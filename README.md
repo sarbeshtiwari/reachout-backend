@@ -129,6 +129,7 @@ Copy `.env.example` to `.env` for local use; on Render set these in the dashboar
 | `TRUST_PROXY` | — | Trust `X-Forwarded-*` from the load balancer (Render: `1`) |
 | `ADMIN_EMAILS` | — | Comma-separated; can see enquiries from the main Reachout site |
 | `SMTP_HOST` `SMTP_PORT` `SMTP_USER` `SMTP_PASSWORD` `MAIL_FROM` | — | Server email for sign-in codes |
+| `BREVO_API_KEY` | — | Send server email over HTTPS via Brevo (use on hosts that block SMTP ports, like Render free). Sender = `MAIL_FROM`, which must be verified in Brevo |
 | `ALLOW_SIGNUP` | `1` | `0` closes new sign-ups |
 | `DAILY_LIMIT` | `100` | Messages per user per day (campaigns + replies + queue) |
 | `MAX_CONTACTS` / `MAX_FILES_MB` | `5000` / `25` | Per-user limits |

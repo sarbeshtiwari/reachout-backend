@@ -114,6 +114,9 @@ SMTP_PORT = env_int("SMTP_PORT", 465)
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 MAIL_FROM = os.environ.get("MAIL_FROM", SMTP_USER)
+# Hosts like Render's free plan block outgoing SMTP ports. With BREVO_API_KEY set, the server's own emails
+# (sign-in codes, notices) go out over HTTPS through Brevo's API instead (free: 300 emails/day).
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "").strip()
 # Production = served to other people. APP_ENV=production is the explicit switch; COOKIE_SECURE=1 still implies it.
 # Anything bound to a non-loopback address is treated as production too, so a forgotten flag can't
 # silently turn on developer conveniences (codes printed to the log, first account = admin) on a public server.
@@ -133,7 +136,7 @@ TERMS_VERSION = "2026-10-01"
 # Shown on the privacy policy and terms pages.
 OPERATOR_NAME = os.environ.get("OPERATOR_NAME", "the Reachout team")
 JURISDICTION = os.environ.get("JURISDICTION", "India")  # public address, e.g. https://reachout.example.com
-DEV_OTP = not SMTP_HOST and not PRODUCTION  # print codes to the terminal instead of emailing
+DEV_OTP = not SMTP_HOST and not BREVO_API_KEY and not PRODUCTION  # print codes to the terminal instead of emailing
 # Site owners who can see website enquiries (Leads). Locally, with none set, the oldest account is the owner.
 ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()}
 
@@ -910,8 +913,32 @@ def send_system_email(to, subject, text):
     if DEV_OTP:
         print(f"\n[Reachout dev] Email to {to}: {subject}\n{text}\n", flush=True)
         return
-    if not SMTP_HOST:
-        raise Invalid("Email sending isn't configured on this server. Contact the site owner.", status=503)
+    try:
+        if BREVO_API_KEY:
+            return _send_via_brevo(to, subject, text)
+        if not SMTP_HOST:
+            raise Invalid("Email sending isn't configured on this server. Contact the site owner.", status=503)
+        return _send_via_smtp(to, subject, text)
+    except Invalid:
+        raise
+    except Exception as e:
+        app.logger.error("System email to a user failed: %s: %s", type(e).__name__, str(e)[:200])
+        raise Invalid("We couldn't send the email right now. Please try again in a few minutes.", status=503)
+
+
+def _send_via_brevo(to, subject, text):
+    import requests
+    from email.utils import parseaddr
+    name, addr = parseaddr(MAIL_FROM or SMTP_USER)
+    r = requests.post("https://api.brevo.com/v3/smtp/email", timeout=20,
+                      headers={"api-key": BREVO_API_KEY, "accept": "application/json", "content-type": "application/json"},
+                      json={"sender": {"name": name or "Reachout", "email": addr}, "to": [{"email": to}],
+                            "subject": subject, "textContent": text})
+    if r.status_code >= 300:
+        raise RuntimeError(f"Brevo {r.status_code}: {r.text[:200]}")
+
+
+def _send_via_smtp(to, subject, text):
     m = EmailMessage()
     m["From"], m["To"], m["Subject"] = MAIL_FROM, to, subject
     m.set_content(text)
