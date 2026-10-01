@@ -1,0 +1,56 @@
+# Render blueprint for this repository (the Reachout API), built from ./Dockerfile.
+# Render → New → Blueprint → pick this repo. Values marked sync: false are asked for once, in the dashboard.
+services:
+  - type: web
+    name: reachout-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter   # 512 MB is enough with WhatsApp off; use "standard" if you set WHATSAPP_ENABLED=1
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: COOKIE_SECURE
+        value: "1"
+      # Render's load balancer is the only way in, and Netlify signs what it forwards.
+      - key: TRUST_PROXY
+        value: "1"
+      # Keep live notification connections under Netlify's proxy timeout.
+      - key: STREAM_SECONDS
+        value: "20"
+      - key: MONGODB_DB
+        value: reachout
+      # WhatsApp automation is against WhatsApp's terms and can get numbers banned: off on the hosted version.
+      # Set to "1" to turn it on (needs the "standard" plan for Chrome's memory).
+      - key: WHATSAPP_ENABLED
+        value: "0"
+      # Shown on the privacy policy and terms pages.
+      - key: OPERATOR_NAME
+        value: the Reachout team
+      - key: JURISDICTION
+        value: India
+      - key: SENTRY_DSN          # optional: error reports (sentry.io → project → Client Keys)
+        sync: false
+      - key: SITE_URL            # the app's Netlify address, e.g. https://reachout-app.netlify.app
+        sync: false
+      - key: LANDING_URL         # the landing page's Netlify address, e.g. https://reachout.netlify.app
+        sync: false
+      - key: SECRET_KEY          # your EXISTING key (~/.reachout/keys/reachout-secret.key), or nothing can be read
+        sync: false
+      - key: NETLIFY_PROXY_SECRET  # long random value; the same on both Netlify sites
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: MAIL_FROM
+        sync: false

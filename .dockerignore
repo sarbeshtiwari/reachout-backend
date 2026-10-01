@@ -1,0 +1,16 @@
+# Only the server code goes into the image. Never secrets, data or tests.
+.git
+.github
+.venv
+venv
+.env
+.env.*
+*.key
+*.pem
+data
+tests
+requirements-dev.txt
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.DS_Store
