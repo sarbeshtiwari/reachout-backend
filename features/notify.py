@@ -29,8 +29,16 @@ STREAM_LOCK = threading.Lock()
 # Each live connection holds a server thread, so they are capped and short: otherwise a handful of open
 # tabs could take every thread and freeze the whole app for everyone.
 STREAM_PER_USER = 2
-STREAM_TOTAL = int(os.environ.get("STREAM_SLOTS", "4"))
-STREAM_SECONDS = int(os.environ.get("STREAM_SECONDS", "50"))  # keep under any proxy timeout (Netlify: ~26 s)
+
+
+def _env_int(name, default):
+    try:
+        return int(str(os.environ.get(name) or "").strip() or default)
+    except ValueError:
+        return default
+
+STREAM_TOTAL = _env_int("STREAM_SLOTS", 4)
+STREAM_SECONDS = _env_int("STREAM_SECONDS", 50)  # keep under any proxy timeout (Netlify: ~26 s)
 PUSH_HOSTS = ("fcm.googleapis.com", "updates.push.services.mozilla.com", "push.services.mozilla.com",
               "notify.windows.com", "push.apple.com")
 MAX_PUSH_DEVICES = 10

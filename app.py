@@ -67,15 +67,25 @@ HERE = BACKEND.parent  # project root: web/, data/ and legacy files live here, n
 WEB = HERE / "web"
 DATA = Path(os.environ.get("DATA_DIR", HERE / "data")).resolve()
 SQLITE_PATH = DATA / "app.db"  # previous storage; migrated into MongoDB on first start
+def env_int(name, default):
+    """A whole-number setting. Unset, empty or invalid values fall back to the default (a blank line in a
+    hosting dashboard must not stop the server from starting)."""
+    try:
+        return int(str(os.environ.get(name) or "").strip() or default)
+    except ValueError:
+        print(f"[Reachout] Ignoring {name}={os.environ.get(name)!r}: not a whole number; using {default}.", flush=True)
+        return default
+
+
 MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://127.0.0.1:27017")
 MONGODB_DB = os.environ.get("MONGODB_DB", "reachout")
 
 ALLOW_SIGNUP = os.environ.get("ALLOW_SIGNUP", "1") != "0"
-DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "100"))        # messages per user per day
-MIN_WA_DELAY = int(os.environ.get("MIN_WA_DELAY", "20"))        # seconds, enforced server-side
-MAX_BROWSERS = int(os.environ.get("MAX_BROWSERS", "3"))         # concurrent WhatsApp browsers
-MAX_CONTACTS = int(os.environ.get("MAX_CONTACTS", "5000"))
-MAX_FILES_MB = int(os.environ.get("MAX_FILES_MB", "25"))        # per user
+DAILY_LIMIT = env_int("DAILY_LIMIT", 100)        # messages per user per day
+MIN_WA_DELAY = env_int("MIN_WA_DELAY", 20)        # seconds, enforced server-side
+MAX_BROWSERS = env_int("MAX_BROWSERS", 3)         # concurrent WhatsApp browsers
+MAX_CONTACTS = env_int("MAX_CONTACTS", 5000)
+MAX_FILES_MB = env_int("MAX_FILES_MB", 25)        # per user
 MAX_FILE_MB = 10                                                # per uploaded file
 MAX_FILES = 20
 ALLOWED_DOCS = {"pdf", "doc", "docx", "odt", "rtf", "txt", "xls", "xlsx", "csv", "ppt", "pptx",
@@ -98,9 +108,9 @@ OTP_TTL = 600
 OTP_ATTEMPTS = 5
 OTP_COOLDOWN = 60
 OTP_FAILS_PER_DAY = 15          # wrong codes per email per day before a 24 h lock
-SYSTEM_MAIL_PER_HOUR = int(os.environ.get("SYSTEM_MAIL_PER_HOUR", "300"))  # login/notice emails the server may send
+SYSTEM_MAIL_PER_HOUR = env_int("SYSTEM_MAIL_PER_HOUR", 300)  # login/notice emails the server may send
 SMTP_HOST = os.environ.get("SMTP_HOST", "")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+SMTP_PORT = env_int("SMTP_PORT", 465)
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 MAIL_FROM = os.environ.get("MAIL_FROM", SMTP_USER)
@@ -3014,7 +3024,7 @@ if os.environ.get("BOUNCE_WATCH", "1") == "1":
     feature_replies.start_workers()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "5050"))
+    port = env_int("PORT", 5050)
     if DEV_OTP:
         print("Email isn't configured (SMTP_HOST), so login codes will be printed here.", flush=True)
     if os.environ.get("OPEN_BROWSER", "1") == "1":
