@@ -44,9 +44,6 @@ services:
         sync: false
       - key: ADMIN_EMAILS
         sync: false
-      # Render's free plan blocks SMTP ports: send sign-in emails through Brevo's HTTPS API instead.
-      - key: BREVO_API_KEY       # brevo.com → SMTP & API → API Keys
-        sync: false
       - key: SMTP_HOST
         sync: false
       - key: SMTP_PORT

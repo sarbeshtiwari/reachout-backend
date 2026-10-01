@@ -144,24 +144,9 @@ def test_system_email_failure_is_a_clean_error(anon, monkeypatch):
     def boom(*a, **k):
         raise OSError(101, "Network is unreachable")
     monkeypatch.setattr(A, "DEV_OTP", False)
-    monkeypatch.setattr(A, "BREVO_API_KEY", "")
     monkeypatch.setattr(A, "SMTP_HOST", "smtp.gmail.com")
     monkeypatch.setattr(A, "_send_via_smtp", boom)
     uid, email = make_user()
     r = anon.post("/api/auth/request-code", json={"email": email}, headers=H)
     assert r.status_code == 503 and "couldn't send" in r.get_json()["error"]
 
-
-def test_brevo_used_when_configured(monkeypatch):
-    sent = {}
-    class R:
-        status_code = 201
-        text = ""
-    import requests
-    monkeypatch.setattr(requests, "post", lambda url, **k: sent.update(url=url, **k) or R())
-    monkeypatch.setattr(A, "DEV_OTP", False)
-    monkeypatch.setattr(A, "BREVO_API_KEY", "xkeysib-test")
-    monkeypatch.setattr(A, "MAIL_FROM", "Reachout <me@gmail.com>")
-    A.send_system_email("you@example.com", "Hi", "Code 123456")
-    assert sent["url"].endswith("/v3/smtp/email") and sent["json"]["sender"] == {"name": "Reachout", "email": "me@gmail.com"}
-    assert sent["headers"]["api-key"] == "xkeysib-test" and sent["json"]["to"] == [{"email": "you@example.com"}]
