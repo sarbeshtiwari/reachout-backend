@@ -669,7 +669,7 @@ def queue_email(ws):
         if not row and len(rows) >= core.MAX_CONTACTS:
             raise core.Invalid(f"You have {core.MAX_CONTACTS} contacts, the most one account can hold. Remove some first.", "to")
         if not row:
-            row = {"id": core.new_id(), "name": fields["name"], "company": fields["company"], "email": to,
+            row = {"id": core.new_id(), "added_at": core.now_iso(), "name": fields["name"], "company": fields["company"], "email": to,
                    "role": fields["role"], "stage": "new", "list": "Hiring posts"}
             if fields["post_url"]:
                 row["post_url"] = fields["post_url"]

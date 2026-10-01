@@ -150,3 +150,12 @@ def test_system_email_failure_is_a_clean_error(anon, monkeypatch):
     r = anon.post("/api/auth/request-code", json={"email": email}, headers=H)
     assert r.status_code == 503 and "couldn't send" in r.get_json()["error"]
 
+
+
+def test_new_contacts_record_when_they_were_added(user):
+    from datetime import date
+    r = user["client"].post("/api/recipients", json={"name": "Dated", "email": "dated@example.com"}, headers=H)
+    assert r.status_code == 200 and r.get_json()["added_at"].startswith(date.today().isoformat())
+    r = user["client"].put(f"/api/recipients/{r.get_json()['id']}", json={"name": "Dated Again", "added_at": "2000-01-01"}, headers=H)
+    row = next(x for x in user["ws"].load("recipients", []) if x["email"] == "dated@example.com")
+    assert row["added_at"].startswith(date.today().isoformat())  # can't be overwritten by an edit

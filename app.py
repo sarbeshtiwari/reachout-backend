@@ -138,7 +138,7 @@ DEV_OTP = not SMTP_HOST and not PRODUCTION  # print codes to the terminal instea
 ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()}
 
 CORE_FIELDS = ["name", "company", "phone", "email"]
-STATUS_FIELDS = ["wa_status", "wa_last", "email_status", "email_last", "email_opened", "replied_at", "reply_intent", "reply_count"]
+STATUS_FIELDS = ["wa_status", "wa_last", "email_status", "email_last", "email_opened", "replied_at", "reply_intent", "reply_count", "added_at"]
 CRM_FIELDS = ["stage", "follow_up"]
 STAGES = {"new": "New", "contacted": "Contacted", "replied": "Replied", "interested": "Interested",
           "not_interested": "Not interested", "won": "Won"}
@@ -567,6 +567,11 @@ def clean_contact(data, partial=False):
 # ---------------------------------------------------------------- per-user workspace
 
 LOCKS = {}
+
+
+def now_iso():
+    """When a contact was added (local time, to the second); used by the "Added" filter."""
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def new_id():
@@ -1719,7 +1724,7 @@ def sentmail_import(ws):
                     raise Invalid(f"You've reached the limit of {MAX_CONTACTS} contacts.")
                 row = {"id": new_id(), **clean_contact({"name": str(it.get("name") or "")[:80],
                                                          "company": str(it.get("company") or "")[:120], "email": addr}),
-                       "stage": "contacted" if mark_contacted else "new", "list": "Imported from Sent mail"}
+                       "stage": "contacted" if mark_contacted else "new", "list": "Imported from Sent mail", "added_at": now_iso()}
                 rows.append(row); by_email[addr] = row; added += 1
             else:
                 updated += 1
@@ -2185,7 +2190,7 @@ def sitemap():
 @app.get("/site.webmanifest")
 def manifest():
     return jsonify(name="Reachout", short_name="Reachout", start_url="/app", display="standalone",
-                   background_color="#ffffff", theme_color="#2563eb",
+                   background_color="#fbfaf7", theme_color="#0f6b54",
                    icons=[{"src": "/assets/icon-192.png", "sizes": "192x192", "type": "image/png"},
                           {"src": "/assets/icon-512.png", "sizes": "512x512", "type": "image/png"}])
 
@@ -2313,7 +2318,7 @@ def add_recipient(ws):
                 raise Invalid("A contact with this phone number already exists.", "phone")
             if ek and r.get("email", "").lower() == ek:
                 raise Invalid("A contact with this email already exists.", "email")
-        row = {"id": new_id(), **fields}
+        row = {"id": new_id(), **fields, "added_at": now_iso()}
         rows.append(row)
         ws.save("recipients", rows)
     return jsonify(row)
@@ -2431,7 +2436,7 @@ def import_recipients(ws):
                 invalid += 1
                 continue
             keys |= {pk, ek} - {""}
-            rows.append({"id": new_id(), **r})
+            rows.append({"id": new_id(), **r, "added_at": now_iso()})
             added += 1
         ws.save("recipients", rows)
         if old_ids:  # replaced contacts: their notes/history go with them
