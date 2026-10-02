@@ -100,6 +100,8 @@ HEADLESS = os.environ.get("WA_HEADLESS", "1") != "0"
 # banned. Hosted versions can switch it off entirely: WHATSAPP_ENABLED=0.
 WHATSAPP_ENABLED = os.environ.get("WHATSAPP_ENABLED", "1") != "0"
 NO_SANDBOX = os.environ.get("CHROMIUM_NO_SANDBOX", "0") == "1"
+# A saved WhatsApp login is deleted this many hours after it was linked (the user is told, and links again to send).
+WA_SESSION_HOURS = env_int("WA_SESSION_HOURS", 2)
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
 LOGGED_IN = "#pane-side, [aria-label='Chat list']"
@@ -912,10 +914,53 @@ def store_wa_folder(ws, folder):
 
 def store_wa_blob(uid, data):
     file_id = put_file(data, uid, "whatsapp")
-    old = M.wa_sessions.find_one_and_update({"_id": uid}, {"$set": {"file_id": file_id, "updated": time.time()}},
-                                            upsert=True)
+    old = M.wa_sessions.find_one_and_update({"_id": uid}, {"$set": {"file_id": file_id, "updated": time.time()},
+                                                           "$setOnInsert": {"created": time.time()}}, upsert=True)
     if old:
         drop_file(old["file_id"])
+
+
+def wa_expires_at(uid):
+    row = M.wa_sessions.find_one({"_id": uid}, {"created": 1, "updated": 1})
+    if not row:
+        return None
+    return (row.get("created") or row.get("updated") or time.time()) + WA_SESSION_HOURS * 3600
+
+
+def expire_wa_sessions(now=None):
+    """Delete every saved WhatsApp login older than WA_SESSION_HOURS and tell its owner. Returns how many went.
+
+    A login that is sending or being linked right now is left until that finishes (the next pass removes it)."""
+    now = now or time.time()
+    cutoff = now - WA_SESSION_HOURS * 3600
+    gone = 0
+    for row in M.wa_sessions.find({"$or": [{"created": {"$lt": cutoff}},
+                                           {"created": {"$exists": False}, "updated": {"$lt": cutoff}}]}):
+        uid = row["_id"]
+        link = WA_LINKS.get(uid)
+        if uid in BUSY or (link and link.state in ("starting", "qr", "saving")):
+            continue
+        if not M.wa_sessions.find_one_and_delete({"_id": uid, "file_id": row["file_id"]}):
+            continue  # changed meanwhile
+        drop_file(row["file_id"])
+        ws = Workspace(uid)
+        ws.update_settings(wa_connected=False, wa_linked_at="")
+        bridge_mod().notify(uid, "WhatsApp was unlinked automatically",
+                            f"For your security, saved WhatsApp logins are deleted {WA_SESSION_HOURS} hours after linking. "
+                            "Link it again when you want to send.", "/app/whatsapp", "whatsapp")
+        gone += 1
+    return gone
+
+
+def wa_expiry_watcher():
+    while True:
+        time.sleep(60)
+        try:
+            n = expire_wa_sessions()
+            if n:
+                print(f"[Reachout] removed {n} expired WhatsApp login(s).", flush=True)
+        except Exception as e:
+            print(f"[Reachout] WhatsApp expiry error: {e}", flush=True)
 
 
 # ---------------------------------------------------------------- rate limits + request guards
@@ -1487,6 +1532,7 @@ def link_whatsapp(ws, link):
                 ctx.close()
         # wa_profile has encrypted and stored the login by now.
         if link.state == "saving":
+            M.wa_sessions.update_one({"_id": ws.uid}, {"$set": {"created": time.time()}})  # a re-link starts a new 2 hours
             ws.update_settings(wa_connected=True, wa_linked_at=datetime.now().isoformat(timespec="seconds"))
             link.state = "connected"
     except Exception as e:
@@ -2887,8 +2933,10 @@ def wa_status(ws):
         state = link.state
     else:
         state = "connected" if st.get("wa_connected") else "disconnected"
+    expires = wa_expires_at(ws.uid) if state == "connected" else None
     return jsonify(state=state, error=link.error if link and link.state == "error" else "",
-                   linked_at=st.get("wa_linked_at", ""))
+                   linked_at=st.get("wa_linked_at", ""), hours=WA_SESSION_HOURS,
+                   expires_at=datetime.fromtimestamp(expires, timezone.utc).isoformat() if expires else "")
 
 
 @app.before_request
@@ -3175,6 +3223,7 @@ for _bp in (feature_github.bp, feature_jobs.bp, feature_linkedin.bp, feature_app
 
 if os.environ.get("BOUNCE_WATCH", "1") == "1":
     threading.Thread(target=bounce_watcher, daemon=True, name="bounce-watcher").start()
+    threading.Thread(target=wa_expiry_watcher, daemon=True, name="wa-expiry").start()
     feature_jobs.start_workers()
     feature_apps.start_workers()
     feature_replies.start_workers()

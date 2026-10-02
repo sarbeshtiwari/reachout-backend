@@ -124,6 +124,7 @@ Copy `.env.example` to `.env` for local use; on Render set these in the dashboar
 | `SECRET_KEY` | `data/secret.key` | Encryption + session key. **Must stay the same forever** for existing data. |
 | `MONGODB_URI` / `MONGODB_DB` | local / `reachout` | Database connection and name |
 | `CLOUDINARY_URL` | empty | `cloudinary://<key>:<secret>@<cloud>` from Cloudinary → API Keys; file storage (empty = GridFS) |
+| `WA_SESSION_HOURS` | `2` | A saved WhatsApp login is deleted this many hours after linking; the user gets a notification |
 | `SITE_URL` | request host | Public address of the **app** site (links, sitemap, share cards) |
 | `LANDING_URL` | — | Public address of the landing site (split hosting) |
 | `NETLIFY_PROXY_SECRET` | — | When set, only Netlify-signed requests are accepted (except `/healthz`) |

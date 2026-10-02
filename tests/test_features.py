@@ -233,3 +233,45 @@ def test_cloudinary_url_is_parsed_and_requests_are_signed():
     assert p["signature"] == hashlib.sha1(f"public_id=x&timestamp={p['timestamp']}&type=privateabc".encode()).hexdigest()
     with pytest.raises(ValueError):
         A.Cloudinary("https://wrong")
+
+
+# ---------------------------------------------------------------- WhatsApp login expiry
+
+def _notes(uid):
+    return [A.unseal(n["data"], {}) for n in A.M.notifications.find({"uid": uid})]
+
+
+def test_whatsapp_login_is_deleted_after_two_hours_and_user_is_told(user, monkeypatch):
+    monkeypatch.setattr(A, "WHATSAPP_ENABLED", True)
+    ws, c = user["ws"], user["client"]
+    A.store_wa_blob(ws.uid, b"login")
+    ws.update_settings(wa_connected=True, wa_linked_at="2026-01-01T00:00:00")
+    st = c.get("/api/whatsapp").get_json()
+    assert st["state"] == "connected" and st["expires_at"] and st["hours"] == 2
+    assert A.expire_wa_sessions(now=time.time() + 3600) == 0  # 1 hour in: still there
+    file_id = A.M.wa_sessions.find_one({"_id": ws.uid})["file_id"]
+    assert A.expire_wa_sessions(now=time.time() + 2 * 3600 + 60) >= 1
+    assert A.M.wa_sessions.find_one({"_id": ws.uid}) is None and A.get_file(file_id) is None
+    assert c.get("/api/whatsapp").get_json()["state"] == "disconnected"
+    assert any("unlinked automatically" in n["title"] for n in _notes(ws.uid))
+
+
+def test_whatsapp_login_in_use_is_kept_until_the_send_finishes(user):
+    ws = user["ws"]
+    A.store_wa_blob(ws.uid, b"login")
+    A.BUSY.add(ws.uid)
+    try:
+        A.expire_wa_sessions(now=time.time() + 3 * 3600)
+        assert A.M.wa_sessions.find_one({"_id": ws.uid})
+    finally:
+        A.BUSY.discard(ws.uid)
+    A.expire_wa_sessions(now=time.time() + 3 * 3600)
+    assert A.M.wa_sessions.find_one({"_id": ws.uid}) is None
+
+
+def test_saving_after_a_send_does_not_extend_the_two_hours(user):
+    ws = user["ws"]
+    A.store_wa_blob(ws.uid, b"login")
+    created = A.M.wa_sessions.find_one({"_id": ws.uid})["created"]
+    A.store_wa_blob(ws.uid, b"login after a send")
+    assert A.M.wa_sessions.find_one({"_id": ws.uid})["created"] == created
