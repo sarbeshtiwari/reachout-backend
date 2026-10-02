@@ -20,7 +20,7 @@ from urllib.parse import quote
 from datetime import date, datetime, timedelta, timezone
 from html import escape
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, jsonify, redirect, request
 
 import bridge
 from bridge import login_required
@@ -850,8 +850,13 @@ def upload_image(ws):
     if core.M.site_images.count_documents({"uid": ws.uid}) >= 60:
         raise core.Invalid("You've reached 60 images. Remove unused ones first.")
     iid = uuid.uuid4().hex
-    core.M.site_images.insert_one({"_id": iid, "uid": ws.uid, "type": f.mimetype, "created": time.time(),
-                                   "data": core.seal(base64.b64encode(data).decode())})
+    row = {"_id": iid, "uid": ws.uid, "type": f.mimetype, "created": time.time()}
+    if core.CLOUD:  # site images are public anyway, so they're served straight from Cloudinary's CDN
+        up = core.CLOUD.upload(data, f"reachout/{ws.uid}/site-{iid}", kind="image", delivery="upload")
+        row.update(url=up["secure_url"], public_id=up["public_id"])
+    else:
+        row["data"] = core.seal(base64.b64encode(data).decode())
+    core.M.site_images.insert_one(row)
     return jsonify(url=f"/p/i/{iid}")
 
 
@@ -861,6 +866,10 @@ def image(iid):
     r = core.M.site_images.find_one({"_id": iid}) if re.fullmatch(r"[0-9a-f]{32}", iid) else None
     if not r:
         return Response(status=404)
+    if r.get("url", "").startswith("https://res.cloudinary.com/"):
+        resp = redirect(r["url"], 302)
+        resp.headers["Cache-Control"] = "public, max-age=86400"
+        return resp
     resp = Response(base64.b64decode(core.unseal(r["data"], "")), mimetype=r["type"])
     resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     return resp

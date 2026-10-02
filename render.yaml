@@ -21,6 +21,9 @@ services:
         value: "20"
       - key: MONGODB_DB
         value: reachout
+      # Uploaded files and the WhatsApp login (encrypted, private). Dashboard → API Keys → API environment variable.
+      - key: CLOUDINARY_URL
+        sync: false
       # WhatsApp automation is against WhatsApp's terms and can get numbers banned: off on the hosted version.
       # Set to "1" to turn it on (needs the "standard" plan for Chrome's memory).
       - key: WHATSAPP_ENABLED

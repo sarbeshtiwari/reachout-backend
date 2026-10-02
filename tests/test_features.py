@@ -159,3 +159,77 @@ def test_new_contacts_record_when_they_were_added(user):
     r = user["client"].put(f"/api/recipients/{r.get_json()['id']}", json={"name": "Dated Again", "added_at": "2000-01-01"}, headers=H)
     row = next(x for x in user["ws"].load("recipients", []) if x["email"] == "dated@example.com")
     assert row["added_at"].startswith(date.today().isoformat())  # can't be overwritten by an edit
+
+
+# ---------------------------------------------------------------- file storage (Cloudinary)
+
+class FakeCloud:
+    PART = 10  # tiny parts, so splitting is exercised
+
+    def __init__(self):
+        self.objects = {}
+
+    def upload(self, data, public_id, kind="raw", delivery="private"):
+        self.objects[(kind, delivery, public_id)] = bytes(data)
+        return {"public_id": public_id, "secure_url": f"https://res.cloudinary.com/demo/{kind}/{delivery}/{public_id}"}
+
+    def download(self, public_id):
+        return self.objects.get(("raw", "private", public_id))
+
+    def destroy(self, public_id, kind="raw", delivery="private"):
+        return self.objects.pop((kind, delivery, public_id), None) is not None
+
+
+@pytest.fixture
+def cloud(monkeypatch):
+    fake = FakeCloud()
+    monkeypatch.setattr(A, "CLOUD", fake)
+    return fake
+
+
+def test_files_go_to_cloudinary_encrypted_and_in_parts(user, cloud):
+    ws = user["ws"]
+    ws.save_doc("resume.pdf", b"%PDF-1.7 my resume " * 20)
+    row = A.M.documents.find_one({"uid": ws.uid})
+    assert isinstance(row["file_id"], dict) and len(row["file_id"]["cld"]) > 1
+    assert all(b"resume" not in v for v in cloud.objects.values())  # Cloudinary only ever sees ciphertext
+    assert all(pid.startswith(f"reachout/{ws.uid}/") for _, _, pid in cloud.objects)
+    assert ws.doc_bytes("resume.pdf") == b"%PDF-1.7 my resume " * 20
+    ws.save_doc("resume.pdf", b"v2")  # replacing removes the old copy
+    assert ws.doc_bytes("resume.pdf") == b"v2" and len(cloud.objects) == len(A.M.documents.find_one({"uid": ws.uid})["file_id"]["cld"])
+
+
+def test_move_gridfs_files_to_cloudinary(user, cloud, monkeypatch):
+    ws = user["ws"]
+    monkeypatch.setattr(A, "CLOUD", None)
+    ws.save_doc("letter.txt", b"cover letter")
+    A.store_wa_blob(ws.uid, b"whatsapp login")
+    A.M.site_images.insert_one({"_id": "a" * 32, "uid": ws.uid, "type": "image/png", "created": 0,
+                                "data": A.seal(base64.b64encode(b"PNGDATA").decode())})
+    monkeypatch.setattr(A, "CLOUD", cloud)
+    A.move_files_to_cloudinary(log=lambda *a: None)
+    assert A.M.db["files.files"].count_documents({"metadata.uid": ws.uid}) == 0
+    assert ws.doc_bytes("letter.txt") == b"cover letter"
+    assert A.get_file(A.M.wa_sessions.find_one({"_id": ws.uid})["file_id"]) == b"whatsapp login"
+    img = A.M.site_images.find_one({"_id": "a" * 32})
+    assert "data" not in img and img["url"].startswith("https://res.cloudinary.com/")
+    assert A.move_files_to_cloudinary(log=lambda *a: None) == 0  # running again does nothing
+
+
+def test_site_images_served_from_cloudinary(user, anon, cloud):
+    import io
+    r = user["client"].post("/api/site/images", data={"file": (io.BytesIO(b"\x89PNG fake"), "a.png", "image/png")},
+                            headers=H, content_type="multipart/form-data")
+    url = r.get_json()["url"]
+    resp = anon.get(url)
+    assert resp.status_code == 302 and resp.headers["Location"].startswith("https://res.cloudinary.com/")
+
+
+def test_cloudinary_url_is_parsed_and_requests_are_signed():
+    c = A.Cloudinary("cloudinary://123:abc@my-cloud")
+    assert (c.key, c.secret, c.cloud) == ("123", "abc", "my-cloud")
+    p = c._signed({"public_id": "x", "type": "private"})
+    import hashlib
+    assert p["signature"] == hashlib.sha1(f"public_id=x&timestamp={p['timestamp']}&type=privateabc".encode()).hexdigest()
+    with pytest.raises(ValueError):
+        A.Cloudinary("https://wrong")

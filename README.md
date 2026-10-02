@@ -67,7 +67,9 @@ helpers through `bridge.C` (the core `app` module) rather than importing `app.py
 - **MongoDB.** Most per-user data lives in the `kv` collection as one document per user and key
   (`<uid>:recipients`, `<uid>:applications`, `<uid>:website`…), read and written with `Workspace.load()` /
   `Workspace.save()`. Event-like data has its own collections: `send_log`, `mail_index`, `replies`, `leads`,
-  `notifications`, `queue`, `sessions`, `otps`, `ratelimits`, `site_*`. Files go to GridFS.
+  `notifications`, `queue`, `sessions`, `otps`, `ratelimits`, `site_*`. Files (documents, the WhatsApp login) go to Cloudinary as private, still-encrypted objects and
+  MongoDB keeps only a reference; website images are served from Cloudinary's CDN. Without `CLOUDINARY_URL`
+  they stay in GridFS. Move existing GridFS files with `python app.py move-files-to-cloudinary`.
 - **Everything is encrypted** with Fernet before it's stored (`seal()` / `unseal()`). Emails are looked up by a
   keyed HMAC (`lookup_hash()`), never stored in plain text. The key comes from `SECRET_KEY`, or `data/secret.key`
   if that's not set. **Losing the key makes all data unreadable; leaking it with a database dump exposes it.**
@@ -121,6 +123,7 @@ Copy `.env.example` to `.env` for local use; on Render set these in the dashboar
 |---|---|---|
 | `SECRET_KEY` | `data/secret.key` | Encryption + session key. **Must stay the same forever** for existing data. |
 | `MONGODB_URI` / `MONGODB_DB` | local / `reachout` | Database connection and name |
+| `CLOUDINARY_URL` | empty | `cloudinary://<key>:<secret>@<cloud>` from Cloudinary → API Keys; file storage (empty = GridFS) |
 | `SITE_URL` | request host | Public address of the **app** site (links, sitemap, share cards) |
 | `LANDING_URL` | — | Public address of the landing site (split hosting) |
 | `NETLIFY_PROXY_SECRET` | — | When set, only Netlify-signed requests are accepted (except `/healthz`) |
