@@ -330,7 +330,7 @@ def llm_review(profile, ranked, top=6):
                    '{{"fit": <0-100>, "verdict": "<one honest sentence, max 25 words>"}}. Do not invent facts.'),
         ("human", "Candidate wants: {role}, {years} years of experience.\nResume (excerpt):\n{resume}\n\n"
                   "Job: {title} at {company} ({location})\nDescription (excerpt):\n{text}")])
-    chain = prompt | ChatOllama(base_url=OLLAMA_URL, model=OLLAMA_MODEL, temperature=0, num_predict=160, format="json") | JsonOutputParser()
+    chain = prompt | ChatOllama(base_url=OLLAMA_URL, model=OLLAMA_MODEL, temperature=0, num_predict=200, format="json", reasoning=False, keep_alive="10m") | JsonOutputParser()
     for j in ranked[:top]:
         try:
             r = chain.invoke({"role": profile["role"], "years": profile["years"], "resume": profile["resume"][:2500], "title": j["title"],
