@@ -527,8 +527,9 @@ FIELD_MAP = [
     (r"^(legal |preferred )?first name$|^given name$", "first"), (r"^(legal )?last name$|^surname$|^family name$", "last"),
     (r"^(full |your )?name$", "name"), (r"^e-?mail( address)?$", "email"),
     (r"^(mobile |cell )?phone( number)?$|^mobile( number)?$|^contact number$", "phone"),
-    (r"^linkedin( profile)?( url| link)?$", "linkedin"), (r"^github( profile)?( url| link)?$", "github"),
-    (r"^(portfolio|personal website|website)( url| link)?$", "portfolio"),
+    (r"^((a )?link to |url (of|to) )?(your )?linkedin( profile)?( url| link| page)?$", "linkedin"),
+    (r"^((a )?link to |url (of|to) )?(your )?github( profile)?( url| link| page)?$", "github"),
+    (r"^((a )?link to |url (of|to) )?(your )?(portfolio|personal website|website|personal site)( url| link)?$", "portfolio"),
     (r"^current (company|employer)( name)?$", "current_company"),
     (r"^(current )?(location|city)( \(city\))?$|^where are you (based|located)\??$", "location"),
     (r"^notice period( \(.*\))?$", "notice")]
@@ -655,6 +656,37 @@ class Live:
         st["at"] = time.time()
 
 
+REMAINING_JS = """(mark) => [...document.querySelectorAll('input[required], textarea[required], select[required], [aria-required=true]')]
+        .filter(e => {
+            if (e.type === 'file' || e.type === 'hidden') return false;
+            const pickerHasValue = x => !!x.closest('[class*=select__control], [class*=-control]')?.querySelector('[class*=single-value], [class*=singleValue], [class*=multi-value]');
+            if (e.matches('[class*=select__input], [role=combobox]') && pickerHasValue(e)) return false;
+            if (e.getAttribute('aria-hidden') === 'true' && e.parentElement && pickerHasValue(e.parentElement.querySelector('input:not([aria-hidden])') || e)) return false;
+            if (!e.matches('input, textarea, select'))  // a group, like an upload box: answered when a file is attached
+                return !([...e.querySelectorAll('input[type=file]')].some(f => f.files.length) || /\\.(pdf|docx?|txt|rtf)\\b/i.test(e.innerText));
+            if (e.offsetParent === null && e.getAttribute('aria-hidden') !== 'true') return false;
+            return !(e.type === 'checkbox' || e.type === 'radio' ? document.querySelector(`input[name="${e.name}"]:checked`) : e.value);
+        })
+        .map(e => { if (mark) (e.closest('.select-shell, .field, .file-upload, fieldset, li') || e.parentElement || e).style.outline = '2px solid #e5484d';
+            return (" + LABEL_JS + ")(e).slice(0, 70) + (e.getAttribute('aria-hidden') === 'true' ? ' (pick from the list)' : '') })""".replace('" + LABEL_JS + "', LABEL_JS)
+
+
+def questions_left(page, mark=False):
+    """Required questions still unanswered, one entry per question (a dropdown's hidden copy isn't counted twice)."""
+    out = {}
+    missing = page.evaluate(REMAINING_JS, mark)
+    for m in missing:
+        hidden = m.endswith(" (pick from the list)")
+        base = re.sub(r"\s*select\.\.\.$", "", m.removesuffix(" (pick from the list)"), flags=re.I).strip()
+        if base == "A question" and len(missing) > 1:
+            continue
+        key = base.lower()
+        if hidden and key in out:
+            continue
+        out.setdefault(key, base + (" (choose from the list)" if hidden else ""))
+    return sorted(out.values())
+
+
 def fill_form(page, values, resume_path, live=lambda page, step="": None):
     """Fill what we can from the user's own details; return the labels of required questions left empty."""
     filled = []
@@ -696,29 +728,8 @@ def fill_form(page, values, resume_path, live=lambda page, step="": None):
     filled += picked
     if picked:
         live(page, "Chose " + ", ".join(picked))
-    missing = page.evaluate("""() => [...document.querySelectorAll('input[required], textarea[required], select[required], [aria-required=true]')]
-        .filter(e => {
-            if (e.type === 'file' || e.type === 'hidden') return false;
-            const pickerHasValue = x => !!x.closest('[class*=select__control], [class*=-control]')?.querySelector('[class*=single-value], [class*=singleValue], [class*=multi-value]');
-            if (e.matches('[class*=select__input], [role=combobox]') && pickerHasValue(e)) return false;
-            if (e.getAttribute('aria-hidden') === 'true' && e.parentElement && pickerHasValue(e.parentElement.querySelector('input:not([aria-hidden])') || e)) return false;
-            if (!e.matches('input, textarea, select'))  // a group, like an upload box: answered when a file is attached
-                return !([...e.querySelectorAll('input[type=file]')].some(f => f.files.length) || /\\.(pdf|docx?|txt|rtf)\\b/i.test(e.innerText));
-            if (e.offsetParent === null && e.getAttribute('aria-hidden') !== 'true') return false;
-            return !(e.type === 'checkbox' || e.type === 'radio' ? document.querySelector(`input[name="${e.name}"]:checked`) : e.value);
-        })
-        .map(e => (" + LABEL_JS + ")(e).slice(0, 70) + (e.getAttribute('aria-hidden') === 'true' ? ' (pick from the list)' : ''))""".replace('" + LABEL_JS + "', LABEL_JS))
-    out = {}
-    for m in missing:
-        hidden = m.endswith(" (pick from the list)")
-        base = re.sub(r"\s*select\.\.\.$", "", m.removesuffix(" (pick from the list)"), flags=re.I).strip()
-        if base == "A question" and len(missing) > 1:
-            continue
-        key = base.lower()
-        if hidden and key in out:
-            continue  # the hidden copy of a dropdown already listed
-        out.setdefault(key, base + (" (choose from the list)" if hidden else ""))
-    return filled, sorted(out.values())
+    missing = questions_left(page)
+    return filled, missing
 
 
 def apply_values(ws):
@@ -825,68 +836,6 @@ def apply_one(ws, job, submit=True, visible=False):
                 browser.close()
 
 
-def hand_over(uid, job):
-    """Fill the form in a browser window on the user's computer and leave it open for them to answer the rest and
-    submit. Reachout never submits here; it watches for the confirmation page and records the application."""
-    from playwright.sync_api import sync_playwright
-    ws = C().Workspace(uid)
-    values = apply_values(ws)
-    resume, data = resume_file(ws)
-    live = Live(uid, job)
-    url = apply_url(job)
-
-    def save(res):
-        with ws.lock:
-            done = ws.load("ai_applied", {})
-            done[job["id"]] = {**res, "at": time.time()}
-            ws.save("ai_applied", done)
-
-    try:
-        with tempfile.TemporaryDirectory(prefix="reachout-apply-") as tmp:
-            path = os.path.join(tmp, re.sub(r"[^\w.\-]", "_", resume) or "resume.pdf")
-            with open(path, "wb") as f:
-                f.write(data)
-            with sync_playwright() as pw:
-                browser = pw.chromium.launch(headless=False, slow_mo=80)
-                page = browser.new_page(user_agent=C().USER_AGENT, viewport=None)
-                page.bring_to_front()
-                if not open_form(page, job, url, live):
-                    save({"state": "closed", "url": url, "detail": "This job is no longer open."})
-                    browser.close()
-                    return
-                filled, missing = fill_form(page, values, path, live)
-                save({"state": "with_you", "url": url, "detail": f"Filled {len(filled)} fields in a window on your computer. "
-                      "Answer the rest there and press Submit.", "questions": missing[:40]})
-                live(page, "Your turn: answer the remaining questions in the window and press Submit")
-                ok, deadline = False, time.time() + 45 * 60
-                while time.time() < deadline and not page.is_closed():
-                    try:
-                        page.wait_for_timeout(2500)
-                        if CONFIRMED.search(page.locator("body").inner_text(timeout=3000)):
-                            ok = True
-                            live(page, "Submitted ✓")
-                            page.wait_for_timeout(4000)
-                            break
-                        if int(time.time()) % 10 < 3:
-                            live(page, "")
-                    except Exception:
-                        break
-                try:
-                    browser.close()
-                except Exception:
-                    pass
-        if ok:
-            save({"state": "applied", "url": url, "detail": "You submitted it in the window Reachout filled."})
-            record_application(ws, job)
-        elif (ws.load("ai_applied", {}).get(job["id"]) or {}).get("state") == "with_you":
-            save({"state": "needs_you", "url": url, "detail": "The window was closed before submitting. Press “Fill & finish” to try again."})
-    except Exception as e:
-        print(f"[Reachout] hand-over failed: {e}", flush=True)
-        save({"state": "needs_you", "url": url, "detail": "Couldn't open the browser window. Try again."})
-    finally:
-        HANDOVER.pop(uid, None)
-
-
 def record_application(ws, job):
     from features import apps
     with ws.lock:
@@ -900,7 +849,203 @@ def record_application(ws, job):
         ws.save("applications", rows)
 
 
+OVERLAY_JS = r"""
+(() => {
+  if (window.__ro_show) return;
+  window.__ro_action = "";
+  window.__ro_show = (msg, buttons) => {
+    const mount = () => {
+      let bar = document.getElementById("__reachout_bar");
+      if (!bar) {
+        bar = document.createElement("div");
+        bar.id = "__reachout_bar";
+        bar.style.cssText = "position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:2147483647;display:flex;gap:10px;"
+          + "align-items:center;max-width:min(760px,94vw);padding:10px 12px 10px 16px;border-radius:14px;color:#fff;"
+          + "font:600 14px/1.35 -apple-system,system-ui,sans-serif;background:linear-gradient(120deg,#7a4b8f,#0f6b54);box-shadow:0 10px 30px rgba(0,0,0,.25)";
+        document.documentElement.appendChild(bar);
+      }
+      bar.innerHTML = "";
+      const t = document.createElement("span"); t.textContent = "✦ Reachout AI · " + msg; t.style.flex = "1"; bar.appendChild(t);
+      for (const [id, label] of buttons || []) {
+        const b = document.createElement("button"); b.textContent = label; b.type = "button";
+        b.style.cssText = "border:0;border-radius:9px;padding:7px 12px;font:600 13px system-ui;cursor:pointer;"
+          + (id === "continue" ? "background:#fff;color:#0f6b54" : "background:rgba(255,255,255,.18);color:#fff");
+        b.onclick = e => { e.preventDefault(); window.__ro_action = id; };
+        bar.appendChild(b);
+      }
+    };
+    document.body ? mount() : addEventListener("DOMContentLoaded", mount);
+  };
+})();
+"""
+LOGIN_WALL = re.compile(r"\b(sign in|log ?in|create (an |your )?account|sign up|register to apply|verify your email)\b", re.I)
+
+
+class Watch:
+    """A visible browser on the user's computer: each job opens in a new tab, Reachout fills and submits, and pauses
+    with a bar at the bottom of the page whenever the user is needed (sign-in, account creation, questions, CAPTCHA)."""
+
+    def __init__(self, pw, uid):
+        self.uid = uid
+        profile = C().DATA / "apply-browser"  # remembers sign-ins between runs, on this computer only
+        profile.mkdir(parents=True, exist_ok=True)
+        self.ctx = pw.chromium.launch_persistent_context(str(profile), headless=False, slow_mo=140, viewport=None,
+                                                         user_agent=C().USER_AGENT, args=["--start-maximized"])
+        self.ctx.add_init_script(OVERLAY_JS)
+        self.stop = False
+
+    def bar(self, page, msg, buttons=()):
+        try:
+            page.evaluate("([m, b]) => { window.__ro_show && window.__ro_show(m, b) }", [msg, list(buttons)])
+        except Exception:
+            pass
+
+    def action(self, page):
+        try:
+            a = page.evaluate("() => { const a = window.__ro_action || ''; window.__ro_action = ''; return a }")
+        except Exception:
+            return ""
+        return a
+
+    def wait_for_user(self, page, live, msg, done=None, minutes=30):
+        """Show the bar and wait until the user presses Continue/Skip, `done(page)` becomes true, or the tab closes."""
+        live(page, "Waiting for you: " + msg)
+        end = time.time() + minutes * 60
+        while time.time() < end:
+            if page.is_closed():
+                return "closed"
+            self.bar(page, msg, [("continue", "Continue"), ("skip", "Skip this job")])
+            a = self.action(page)
+            if a in ("continue", "skip"):
+                return a
+            try:
+                if done and done(page):
+                    return "done"
+            except Exception:
+                pass
+            page.wait_for_timeout(1000)
+            if int(time.time()) % 4 == 0:
+                live(page, "")
+        return "timeout"
+
+
+def login_wall(page):
+    """A sign-in or sign-up step stands between us and the form (a password box, no upload field)."""
+    try:
+        if page.locator("input[type=password]:visible").count():
+            return True
+        return not page.locator("input[type=file]").count() and bool(LOGIN_WALL.search(page.locator("body").inner_text(timeout=3000)[:4000]))
+    except Exception:
+        return False
+
+
+def watch_apply(w, ws, job, values, path):
+    """Apply to one job in a new visible tab, pausing for the user where needed. Returns the result dict."""
+    live = Live(ws.uid, job)
+    url = apply_url(job)
+    page = w.ctx.new_page()
+    page.bring_to_front()
+    try:
+        if not open_form(page, job, url, live):
+            live(page, "This job is no longer open")
+            page.wait_for_timeout(2500)
+            return {"state": "closed", "url": url, "detail": "This job is no longer open."}
+        w.bar(page, "Filling this application for you…")
+        if login_wall(page):
+            a = w.wait_for_user(page, live, "This site needs you to sign in or create an account. Do it here, then press Continue.",
+                                done=lambda p: not login_wall(p) and p.locator("input[type=file]").count() > 0)
+            if a in ("skip", "closed", "timeout"):
+                return {"state": "needs_you", "url": url, "detail": "Skipped at the sign-in step."}
+            if not page.locator("input[type=file]").count():
+                open_form(page, job, url, live)
+        filled, missing = fill_form(page, values, path, live)
+        if "Resume" not in filled:
+            a = w.wait_for_user(page, live, "Attach your resume in this form, then press Continue.")
+            if a in ("skip", "closed", "timeout"):
+                return {"state": "needs_you", "url": url, "detail": "Couldn't find where to attach your resume."}
+        while True:
+            page.evaluate("() => document.querySelectorAll('[style*=\"e5484d\"]').forEach(e => e.style.outline = '')")
+            left = len(questions_left(page, mark=True))
+            if left == 0 and not challenge_visible(page):
+                break
+            page.evaluate("() => document.querySelector('[style*=\"e5484d\"]')?.scrollIntoView({behavior: 'smooth', block: 'center'})")
+            msg = (f"{left} question{'s' if left != 1 else ''} only you can answer (outlined in red). Answer them, then press Continue."
+                   if left else "Solve the CAPTCHA, then press Continue.")
+            a = w.wait_for_user(page, live, msg, done=lambda p: bool(CONFIRMED.search(p.locator("body").inner_text(timeout=3000))))
+            if a == "done":
+                live(page, "Submitted ✓")
+                return {"state": "applied", "url": url, "detail": "You submitted it in the Reachout window."}
+            if a in ("skip", "closed", "timeout"):
+                return {"state": "needs_you", "url": url, "questions": missing[:40], "detail": "Skipped: questions were left unanswered."}
+        btn = page.locator("button[type=submit], input[type=submit], button:has-text('Submit application'), button:has-text('Submit')").first
+        btn.scroll_into_view_if_needed(timeout=3000)
+        w.bar(page, "Submitting your application…")
+        live(page, "Submitting…")
+        btn.click()
+        page.wait_for_timeout(6000)
+        if CONFIRMED.search(page.locator("body").inner_text()):
+            w.bar(page, "Submitted ✓ Moving on…")
+            live(page, "Submitted ✓")
+            page.wait_for_timeout(2000)
+            return {"state": "applied", "url": url, "detail": "Application submitted."}
+        a = w.wait_for_user(page, live, "No confirmation yet. Fix anything the form points out and submit, or press Continue to move on.",
+                            done=lambda p: bool(CONFIRMED.search(p.locator("body").inner_text(timeout=3000))))
+        if a == "done":
+            return {"state": "applied", "url": url, "detail": "Application submitted."}
+        return {"state": "needs_you", "url": url, "detail": "Submitted, but no confirmation appeared. Check the page."}
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
+
+
+def run_watch(uid, picks):
+    """Visible mode on the user's computer: one browser window, a tab per job, pausing for the user when needed."""
+    from playwright.sync_api import sync_playwright
+    ws = C().Workspace(uid)
+    st = APPLYING[uid]
+    values = apply_values(ws)
+    resume, data = resume_file(ws)
+    try:
+        with tempfile.TemporaryDirectory(prefix="reachout-apply-") as tmp, APPLY_LOCK, sync_playwright() as pw:
+            path = os.path.join(tmp, re.sub(r"[^\w.\-]", "_", resume) or "resume.pdf")
+            with open(path, "wb") as f:
+                f.write(data or b"")
+            w = Watch(pw, uid)
+            try:
+                for job in picks:
+                    st["current"] = job["title"]
+                    try:
+                        res = watch_apply(w, ws, job, values, path)
+                    except Exception as e:
+                        print(f"[Reachout] watch apply error: {e}", flush=True)
+                        res = {"state": "needs_you", "url": job["url"], "detail": "The window was closed or the page changed. Apply on the site."}
+                    res["at"] = time.time()
+                    with ws.lock:
+                        done = ws.load("ai_applied", {})
+                        done[job["id"]] = res
+                        ws.save("ai_applied", done)
+                    if res["state"] == "applied":
+                        record_application(ws, job)
+                    st["done"] += 1
+            finally:
+                try:
+                    w.ctx.close()
+                except Exception:
+                    pass
+    finally:
+        st["state"] = "done"
+        HANDOVER.pop(uid, None)
+        from features.notify import notify
+        ok = sum(1 for j in picks if (ws.load("ai_applied", {}).get(j["id"]) or {}).get("state") == "applied")
+        notify(uid, f"Reachout AI applied to {ok} job{'s' if ok != 1 else ''}", f"{len(picks) - ok} still need you.",
+               "/app/ai-jobs", "application")
+
+
 def run_apply(uid, picks, visible=False):
+    if visible:
+        return run_watch(uid, picks)
     ws = C().Workspace(uid)
     st = APPLYING[uid]
     try:
@@ -982,5 +1127,6 @@ def finish(ws, jid):
     if not resume_file(ws)[1]:
         raise core.Invalid("Upload your resume as a PDF first.", "resume")
     HANDOVER[ws.uid] = jid
-    threading.Thread(target=hand_over, args=(ws.uid, job), daemon=True, name="ai-handover").start()
+    APPLYING[ws.uid] = {"state": "running", "total": 1, "done": 0, "current": job["title"], "visible": True}
+    threading.Thread(target=run_watch, args=(ws.uid, [job]), daemon=True, name="ai-watch").start()
     return jsonify(ok=True)

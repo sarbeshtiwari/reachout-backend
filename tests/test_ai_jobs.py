@@ -146,3 +146,9 @@ def test_live_view_and_hand_over_rules(user, monkeypatch):
     r = c.post(f"/api/ai-jobs/finish/{JOBS[0]['id']}", json={}, headers=H)
     assert r.status_code == 400 and "your own computer" in r.get_json()["error"]
     AI.LIVE.pop(ws.uid, None)
+
+
+@pytest.mark.parametrize("label,key", [("link to your github profile", "github"), ("link to your linkedin profile", "linkedin"),
+                                       ("your linkedin url", "linkedin"), ("github profile link", "github"), ("link to your portfolio", "portfolio")])
+def test_profile_link_questions_are_filled(label, key):
+    assert next((k for pat, k in AI.FIELD_MAP if AI.re.search(pat, label)), None) == key
