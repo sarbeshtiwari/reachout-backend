@@ -76,7 +76,45 @@ def revoke_key(ws):
 def ext_status(ws):
     st = ws.settings()
     return jsonify(has_key=bool(st.get("ext_key_hash")), created=st.get("ext_key_created") or 0,
-                   last_used=st.get("ext_last_used") or 0)
+                   last_used=st.get("ext_last_used") or 0, can_install=AI().can_hand_over(), folder=str(install_dir()))
+
+
+def install_dir():
+    from pathlib import Path
+    return Path.home() / "Documents" / "Reachout Autofill"
+
+
+@bp.post("/api/extension/install")
+@login_required
+def install_local(ws):
+    """When Reachout runs on the user's own computer: unpack the extension into Documents and show it in Finder."""
+    import io
+    import platform
+    import subprocess
+    import zipfile
+    core = C()
+    if not AI().can_hand_over():
+        raise core.Invalid("This works when Reachout runs on your own computer. Download the zip instead.")
+    pkg = core.WEB / "dist" / "downloads" / "reachout-autofill.zip"
+    if not pkg.exists():
+        raise core.Invalid("The extension package is missing. Rebuild the app (npm run build).", status=500)
+    dest = install_dir()
+    dest.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(pkg.read_bytes())) as z:
+        for info in z.infolist():
+            target = (dest / info.filename).resolve()
+            if not str(target).startswith(str(dest.resolve())):  # never write outside the folder
+                continue
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(z.read(info))
+    if platform.system() == "Darwin":
+        subprocess.run(["open", str(dest)], check=False, timeout=10)
+    elif platform.system() == "Windows":
+        subprocess.run(["explorer", str(dest)], check=False, timeout=10)
+    return jsonify(folder=str(dest))
 
 
 # ----------------------------------------------------------------- used by the extension (extension key)

@@ -223,3 +223,16 @@ def test_extension_key_scopes_and_revocation(user):
     assert r.get_json()["saved"] == 1  # contact fields aren't learned
     assert c.delete("/api/extension/key", headers=H).status_code == 200
     assert anon.post("/api/ext/autofill", json={}, headers=auth).status_code == 401
+
+
+def test_unpacked_install_only_on_your_own_computer(user, monkeypatch, tmp_path):
+    from features import extension as E
+    c = user["client"]
+    monkeypatch.setattr(E, "install_dir", lambda: tmp_path / "Reachout Autofill")
+    monkeypatch.setattr(__import__("subprocess"), "run", lambda *a, **k: None)
+    monkeypatch.setattr(AI, "can_hand_over", lambda: True)
+    if (A.WEB / "dist" / "downloads" / "reachout-autofill.zip").exists():
+        r = c.post("/api/extension/install", json={}, headers=H)
+        assert r.status_code == 200 and (tmp_path / "Reachout Autofill" / "manifest.json").exists()
+    monkeypatch.setattr(AI, "can_hand_over", lambda: False)
+    assert c.post("/api/extension/install", json={}, headers=H).status_code == 400
