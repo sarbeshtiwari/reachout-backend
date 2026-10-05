@@ -236,3 +236,21 @@ def test_unpacked_install_only_on_your_own_computer(user, monkeypatch, tmp_path)
         assert r.status_code == 200 and (tmp_path / "Reachout Autofill" / "manifest.json").exists()
     monkeypatch.setattr(AI, "can_hand_over", lambda: False)
     assert c.post("/api/extension/install", json={}, headers=H).status_code == 400
+
+
+def test_cover_letter_choice(user):
+    c, ws = user["client"], user["ws"]
+    assert AI.cover_file(ws) == ("", None)
+    ws.save_doc("resume.pdf", b"%PDF-1.4 r")
+    ws.save_doc("My Cover Letter.txt", b"Dear Hiring Team,\n\nI'd love to join.")
+    assert AI.cover_file(ws)[0] == "My Cover Letter.txt"  # automatic: the file with "cover" in its name
+    assert AI.cover_text(*AI.cover_file(ws)).startswith("Dear Hiring Team")
+    assert c.put("/api/ai-jobs/details", json={"cover_letter": "none"}, headers=H).status_code == 200
+    assert AI.cover_file(ws) == ("", None)
+    assert c.put("/api/ai-jobs/details", json={"cover_letter": "nope.pdf"}, headers=H).status_code == 400
+    assert c.put("/api/ai-jobs/details", json={"cover_letter": "auto"}, headers=H).status_code == 200
+    key = c.post("/api/extension/key", json={}, headers=H).get_json()["key"]
+    anon = A.app.test_client()
+    r = anon.post("/api/ext/autofill", json={"url": "https://x.example"}, headers={**H, "Authorization": "Bearer " + key}).get_json()
+    assert r["cover"]["name"] == "My Cover Letter.txt"
+    assert anon.get("/api/ext/cover", headers={**H, "Authorization": "Bearer " + key}).data.startswith(b"Dear Hiring Team")

@@ -444,7 +444,8 @@ def public_state(ws):
                   "model_name": OLLAMA_MODEL, "resumes": [d["name"] for d in ws.documents() if d["name"].lower().endswith(".pdf")],
                   "details": ws.load("ai_apply_profile", {}), "consent": bool(ws.settings().get("auto_apply_consent")),
                   "applying": APPLYING.get(ws.uid, {}), "apply_per_day": APPLY_PER_DAY,
-                  "can_hand_over": can_hand_over(), "handover": HANDOVER.get(ws.uid, "")}
+                  "can_hand_over": can_hand_over(), "handover": HANDOVER.get(ws.uid, ""),
+                  "documents": [d["name"] for d in ws.documents() if COVER_DOC.search(d["name"])], "cover_letter": cover_file(ws)[0]}
 
 
 @bp.get("/api/ai-jobs")
@@ -511,6 +512,10 @@ def save_details(ws):
         if v and k in ("linkedin", "github", "portfolio") and not re.match(r"^https://[^\s<>\"']+$", v):
             raise core.Invalid(f"{label} should be a full https:// link.", k)
         out[k] = v
+    cover = str(p.get("cover_letter", (ws.load("ai_apply_profile", {}) or {}).get("cover_letter", "auto")))[:200]
+    if cover not in ("auto", "none") and cover not in {d["name"] for d in ws.documents()}:
+        raise core.Invalid("Pick a cover letter from your files.", "cover_letter")
+    out["cover_letter"] = cover
     consent = p.get("consent")
     with ws.lock:
         ws.save("ai_apply_profile", out)
@@ -863,17 +868,35 @@ def questions_left(page, mark=False):
     return sorted(out.values())
 
 
-def fill_form(page, values, resume_path, live=lambda page, step="": None, answers=None, company=""):
-    """Fill what we can from the user's own details; return the labels of required questions left empty."""
+def file_input_label(f):
+    try:
+        return (" ".join(filter(None, [f.get_attribute("name"), f.get_attribute("id"), f.get_attribute("aria-label")])) + " "
+                + (f.evaluate("e => (" + LABEL_JS + ")(e)") or "")).lower()
+    except Exception:
+        return ""
+
+
+def fill_form(page, values, resume_path, live=lambda page, step="": None, answers=None, company="", cover=None):
+    """Fill what we can from the user's own details; return the labels of required questions left empty.
+
+    cover = {"path": file to attach, "text": the letter's text} when the user has a cover letter to send."""
     filled = []
     files = page.locator("input[type=file]")
     for i in range(files.count()):
         f = files.nth(i)
-        attrs = " ".join(filter(None, [f.get_attribute("name"), f.get_attribute("id"), f.get_attribute("aria-label")])).lower()
+        attrs = file_input_label(f)
         if "cover" in attrs:
             continue
         if "resume" in attrs or "cv" in attrs or i == 0:
             f.set_input_files(resume_path); filled.append("Resume"); live(page, "Attached your resume"); break
+    if cover and cover.get("path"):
+        for i in range(files.count()):
+            f = files.nth(i)
+            try:
+                if "cover" in file_input_label(f) and not f.evaluate("e => e.files.length"):
+                    f.set_input_files(cover["path"]); filled.append("Cover letter"); live(page, "Attached your cover letter"); break
+            except Exception:
+                continue
     if filled:  # some forms read the resume and refill (and reset) the fields; let that finish first
         try:
             page.wait_for_load_state("networkidle", timeout=10000)
@@ -888,6 +911,13 @@ def fill_form(page, values, resume_path, live=lambda page, step="": None, answer
                 continue  # a dropdown that only looks like a text box: answers there are the user's call
             label = (el.evaluate("e => (" + LABEL_JS + ")(e)") or "").lower().strip(" ?:")
         except Exception:
+            continue
+        if cover and cover.get("text") and re.fullmatch(r"(your |a )?cover letter( \(optional\))?|cover letter / message|message to (the )?hiring (team|manager)", label):
+            try:
+                el.scroll_into_view_if_needed(timeout=2000)
+                el.fill(cover["text"], timeout=8000); filled.append("Cover letter (pasted)"); live(page, "Pasted your cover letter")
+            except Exception:
+                pass
             continue
         if len(label) > 40:
             continue  # a real question, not a contact field
@@ -917,6 +947,48 @@ def apply_values(ws):
     dial = str(ws.settings().get("country_code") or "").lstrip("+")
     return {"name": name, "first": first, "last": last or first, "email": prof.get("email") or C().find_user(uid=ws.uid)["email"],
             "phone": prof.get("phone", ""), "dial": dial, "country": COUNTRIES.get(dial, ""), **extra}
+
+
+COVER_DOC = re.compile(r"\.(pdf|docx?|txt|rtf)$", re.I)
+
+
+def cover_file(ws):
+    """(name, bytes) of the cover letter to attach, or ("", None). 'auto' = a file in Files with "cover" in its name."""
+    choice = (ws.load("ai_apply_profile", {}) or {}).get("cover_letter", "auto")
+    if choice == "none":
+        return "", None
+    names = [d["name"] for d in ws.documents()]
+    name = choice if choice in names else next((n for n in names if "cover" in n.lower() and COVER_DOC.search(n)), "")
+    return (name, ws.doc_bytes(name)) if name else ("", None)
+
+
+def cover_text(name, data):
+    """The letter's text, for forms that ask you to paste it instead of attaching a file."""
+    import io
+    if not data:
+        return ""
+    try:
+        if name.lower().endswith(".pdf"):
+            from pypdf import PdfReader
+            text = "\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(data)).pages)
+        elif name.lower().endswith(".txt"):
+            text = data.decode("utf-8", errors="replace")
+        else:
+            return ""
+    except Exception:
+        return ""
+    text = text.replace("\ufb01", "fi").replace("\ufb02", "fl")
+    return re.sub(r"[ \t]+\n", "\n", re.sub(r"\n{3,}", "\n\n", text)).strip()[:6000]
+
+
+def write_cover(ws, tmp):
+    name, data = cover_file(ws)
+    if not data:
+        return None
+    path = os.path.join(tmp, re.sub(r"[^\w.\-]", "_", name) or "cover-letter.pdf")
+    with open(path, "wb") as f:
+        f.write(data)
+    return {"path": path, "text": cover_text(name, data), "name": name}
 
 
 def resume_file(ws):
@@ -998,6 +1070,7 @@ def apply_one(ws, job, submit=True, visible=False):
         path = os.path.join(tmp, re.sub(r"[^\w.\-]", "_", resume) or "resume.pdf")
         with open(path, "wb") as f:
             f.write(data)
+        cover = write_cover(ws, tmp)
         with APPLY_LOCK, sync_playwright() as pw:
             args = ["--no-sandbox"] if C().NO_SANDBOX else []
             browser = pw.chromium.launch(headless=not (visible and can_hand_over()), args=args, slow_mo=120 if visible else 0)
@@ -1006,7 +1079,7 @@ def apply_one(ws, job, submit=True, visible=False):
                 if not open_form(page, job, url, live):
                     live(page, "This job is no longer open")
                     return {"state": "closed", "url": url, "detail": "This job is no longer open."}
-                filled, missing = fill_form(page, values, path, live, ws.load("ai_answers", {}), job.get("company", ""))
+                filled, missing = fill_form(page, values, path, live, ws.load("ai_answers", {}), job.get("company", ""), cover)
                 filled = [re.sub(r"\s+", " ", f).strip() for f in filled]
                 if "Resume" not in filled:
                     live(page, "Couldn't find where to attach your resume")
@@ -1168,7 +1241,7 @@ def watch_apply(w, ws, job, values, path):
                 return {"state": "needs_you", "url": url, "detail": "Skipped at the sign-in step."}
             if not page.locator("input[type=file]").count():
                 open_form(page, job, url, live)
-        filled, missing = fill_form(page, values, path, live, ws.load("ai_answers", {}), job.get("company", ""))
+        filled, missing = fill_form(page, values, path, live, ws.load("ai_answers", {}), job.get("company", ""), values.get("_cover"))
         used = [f for f in filled if f.startswith("answer: ")]
         if used:
             w.bar(page, f"Used {len(used)} of your saved answers")
@@ -1250,6 +1323,7 @@ def run_watch(uid, picks):
             path = os.path.join(tmp, re.sub(r"[^\w.\-]", "_", resume) or "resume.pdf")
             with open(path, "wb") as f:
                 f.write(data or b"")
+            values["_cover"] = write_cover(ws, tmp)
             w = Watch(pw, uid)
             try:
                 for job in picks:

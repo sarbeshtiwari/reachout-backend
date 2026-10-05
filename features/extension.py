@@ -161,8 +161,10 @@ def autofill():
                 answers[q] = {"answer": a["answer"].replace("{company}", company or "your company"), "draft": True}
                 break
     resume, data = ai.resume_file(ws)
+    cname, cdata = ai.cover_file(ws)
     ws.update_settings(ext_last_used=time.time())
     return jsonify(company=company, fields=fields, answers=answers, resume={"name": resume, "size": len(data or b"")} if data else None,
+                   cover={"name": cname, "text": ai.cover_text(cname, cdata)} if cdata else None,
                    field_map=[[pat, key] for pat, key in ai.FIELD_MAP])
 
 
@@ -174,6 +176,17 @@ def resume():
         raise C().Invalid("Upload your resume as a PDF in Reachout first.", status=404)
     return Response(data, mimetype="application/pdf", headers={"X-Filename": re.sub(r"[^\w.\-]", "_", name) or "resume.pdf",
                                                                "Cache-Control": "no-store"})
+
+
+@bp.get("/api/ext/cover")
+def cover():
+    ws = ext_workspace()
+    name, data = AI().cover_file(ws)
+    if not data:
+        raise C().Invalid("No cover letter chosen in Reachout.", status=404)
+    kind = "application/pdf" if name.lower().endswith(".pdf") else "application/octet-stream"
+    return Response(data, mimetype=kind, headers={"X-Filename": re.sub(r"[^\w.\-]", "_", name) or "cover-letter.pdf",
+                                                  "Cache-Control": "no-store"})
 
 
 @bp.post("/api/ext/learn")
