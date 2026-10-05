@@ -116,3 +116,19 @@ def test_auto_apply_needs_consent_and_records_the_application(user, monkeypatch)
     assert any(a["portal"] == "Auto-apply (Lever)" for a in ws.load("applications", {}).values())
     r = c.post("/api/ai-jobs/apply", json={"ids": [JOBS[0]["id"]]}, headers=H)  # never applies twice
     assert r.status_code == 400
+
+
+def test_greenhouse_jobs_apply_on_greenhouse_even_when_shown_on_the_company_site():
+    j = {"id": "gh:coinbase:7985187", "ats": "greenhouse", "url": "https://www.coinbase.com/careers/positions/7985187?gh_jid=7985187"}
+    url = AI.apply_url(j)
+    assert url == "https://job-boards.greenhouse.io/embed/job_app?for=coinbase&token=7985187"
+    assert AI.urlsplit(url).hostname in AI.APPLY_HOSTS
+
+
+@pytest.mark.parametrize("label,key", [("first name", "first"), ("email", "email"), ("phone", "phone"), ("location (city)", "location"),
+                                       ("linkedin profile url", "linkedin"),
+                                       ("have you previously been employed by coinbase in any capacity", None),
+                                       ("are you a close relative of a government official", None)])
+def test_only_contact_fields_are_filled_never_questions(label, key):
+    hit = next((k for pat, k in AI.FIELD_MAP if AI.re.search(pat, label)), None)
+    assert hit == key

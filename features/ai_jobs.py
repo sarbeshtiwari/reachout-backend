@@ -518,11 +518,17 @@ def save_details(ws):
 
 # ================================================================= auto-apply (Playwright, public forms only)
 
-FIELD_MAP = [  # (label pattern, value key)
-    (r"^first\s*name|given name", "first"), (r"^last\s*name|surname|family name", "last"), (r"^(full\s*)?name\b|^your name", "name"),
-    (r"e-?mail", "email"), (r"phone|mobile|contact number", "phone"), (r"linkedin", "linkedin"), (r"github", "github"),
-    (r"portfolio|personal (site|website)|^website", "portfolio"), (r"current (company|employer)|^company$|organi[sz]ation", "current_company"),
-    (r"^(current )?location|city|where are you (based|located)", "location"), (r"notice period", "notice")]
+# (label pattern, value key). Whole words only and checked against short labels, so a question like
+# "employed by us in any capacity?" can never match "city".
+FIELD_MAP = [
+    (r"^(legal |preferred )?first name$|^given name$", "first"), (r"^(legal )?last name$|^surname$|^family name$", "last"),
+    (r"^(full |your )?name$", "name"), (r"^e-?mail( address)?$", "email"),
+    (r"^(mobile |cell )?phone( number)?$|^mobile( number)?$|^contact number$", "phone"),
+    (r"^linkedin( profile)?( url| link)?$", "linkedin"), (r"^github( profile)?( url| link)?$", "github"),
+    (r"^(portfolio|personal website|website)( url| link)?$", "portfolio"),
+    (r"^current (company|employer)( name)?$", "current_company"),
+    (r"^(current )?(location|city)( \(city\))?$|^where are you (based|located)\??$", "location"),
+    (r"^notice period( \(.*\))?$", "notice")]
 LABEL_JS = """(e => { const t = x => (x || '').replace(/[✱*]/g, '').replace(/\\s+/g, ' ').trim();
       if (e.labels && e.labels[0] && t(e.labels[0].innerText)) return t(e.labels[0].innerText);
       if (e.getAttribute('aria-label')) return t(e.getAttribute('aria-label'));
@@ -546,12 +552,83 @@ def challenge_visible(page):
     return False
 
 
+APPLY_HOSTS = {"job-boards.greenhouse.io", "job-boards.eu.greenhouse.io", "boards.greenhouse.io", "boards.eu.greenhouse.io",
+               "jobs.lever.co", "jobs.eu.lever.co", "jobs.ashbyhq.com"}
+
+
 def apply_url(job):
+    """The job board's own application form. Many companies show their Greenhouse jobs on their own careers site
+    (coinbase.com/careers/…), so Greenhouse jobs always go to Greenhouse's hosted form for that job instead."""
+    if job["ats"] == "greenhouse":
+        _, board, jid = job["id"].split(":", 2)
+        eu = ".eu" if ".eu.greenhouse.io" in job.get("url", "") else ""
+        return f"https://job-boards{eu}.greenhouse.io/embed/job_app?for={board}&token={jid}"
     if job["ats"] == "lever":
         return job.get("apply_url") or job["url"].rstrip("/") + "/apply"
     if job["ats"] == "ashby":
         return job["url"].rstrip("/") + "/application"
     return job["url"]
+
+
+TEXT_BOXES = ("input:not([type=file]):not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit])"
+              ":not([type=search]):not([role=combobox]):not([aria-autocomplete]):not([aria-haspopup]):not([readonly]), textarea")
+COUNTRIES = {"91": "India", "1": "United States", "44": "United Kingdom", "971": "United Arab Emirates", "65": "Singapore",
+             "61": "Australia", "49": "Germany", "33": "France", "31": "Netherlands", "353": "Ireland", "966": "Saudi Arabia",
+             "974": "Qatar", "60": "Malaysia", "81": "Japan", "86": "China", "880": "Bangladesh", "92": "Pakistan",
+             "94": "Sri Lanka", "977": "Nepal", "27": "South Africa", "234": "Nigeria", "254": "Kenya", "55": "Brazil"}
+
+
+def pick(page, box, text):
+    """Type into a searchable dropdown and choose the option that matches the user's own value; never a guess."""
+    try:
+        box.click(timeout=4000)
+        box.fill(text, timeout=4000)
+        page.wait_for_timeout(1800)  # options load as you type (city lists come from a server)
+        opt = page.locator("[role=option]:visible, [class*=select__option]:visible").filter(has_text=re.compile(rf"^\s*{re.escape(text)}\b", re.I)).first
+        if opt.count():
+            opt.click(timeout=4000)
+            page.wait_for_timeout(600)
+            return True
+        box.fill("", timeout=2000)
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    return False
+
+
+def fill_pickers(page, values):
+    """Country, city and the phone's country code, from the user's own details."""
+    done = []
+    country, city = values.get("country", ""), values.get("location", "").split(",")[0].strip()
+    # Read the dropdowns first, then act on each by id: choosing an option re-renders the form.
+    boxes = page.evaluate("""() => [...document.querySelectorAll('input[class*=select__input], input[role=combobox]')]
+        .filter(e => e.id && e.offsetParent !== null)
+        .map(e => [e.id, (""" + LABEL_JS + """)(e).toLowerCase(),
+                   !!e.closest('[class*=select__control], [class*=-control]')?.querySelector('[class*=single-value], [class*=singleValue]')])""")
+    for bid, label, already in boxes:
+        label = label.strip(" ?:")
+        if already:
+            continue
+        box = page.locator(f"[id='{bid}']")
+        if re.fullmatch(r"country( of residence)?", label) and country and pick(page, box, country):
+            done.append("country")
+        elif re.fullmatch(r"(current )?(location|city)( \(city\))?", label) and city and pick(page, box, city):
+            done.append("city")
+    flag = page.locator(".iti__selected-country, .iti__selected-flag, .iti__flag-container button").first
+    if country and values.get("dial") and flag.count():
+        try:
+            if f"+{values['dial']}" not in (flag.get_attribute("title") or "") + flag.inner_text():
+                flag.click(timeout=4000)
+                page.locator(".iti__search-input").first.fill(country, timeout=4000)
+                page.wait_for_timeout(500)
+                item = page.locator(f".iti__country[data-dial-code='{values['dial']}']").first
+                if item.count():
+                    item.click(timeout=4000); done.append("phone country code")
+                else:
+                    page.keyboard.press("Escape")
+        except Exception:
+            pass
+    return done
 
 
 def fill_form(page, values, resume_path):
@@ -565,21 +642,54 @@ def fill_form(page, values, resume_path):
             continue
         if "resume" in attrs or "cv" in attrs or i == 0:
             f.set_input_files(resume_path); filled.append("Resume"); break
-    for el in page.locator("input:not([type=file]):not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]), textarea").all():
+    if filled:  # some forms read the resume and refill (and reset) the fields; let that finish first
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
+        page.wait_for_timeout(2500)
+    for el in page.locator(TEXT_BOXES).all():
         try:
             if not el.is_visible() or el.input_value():
                 continue
-            label = (el.evaluate("e => (" + LABEL_JS + ")(e)") or "").lower()
+            if el.evaluate("e => e.type !== 'tel' && !!e.closest('[class*=select__], [class*=-select], [class*=dropdown], [role=listbox]')"):
+                continue  # a dropdown that only looks like a text box: answers there are the user's call
+            label = (el.evaluate("e => (" + LABEL_JS + ")(e)") or "").lower().strip(" ?:")
         except Exception:
             continue
+        if len(label) > 40:
+            continue  # a real question, not a contact field
         for pat, key in FIELD_MAP:
             if re.search(pat, label) and values.get(key):
-                el.fill(values[key]); filled.append(label[:40]); break
+                try:
+                    el.fill(values[key], timeout=5000); filled.append(label)
+                except Exception:
+                    pass
+                break
+    filled += fill_pickers(page, values)
     missing = page.evaluate("""() => [...document.querySelectorAll('input[required], textarea[required], select[required], [aria-required=true]')]
-        .filter(e => e.offsetParent !== null && e.type !== 'file' && e.type !== 'hidden' && !(e.type === 'checkbox' || e.type === 'radio'
-                ? document.querySelector(`input[name="${e.name}"]:checked`) : e.value))
-        .map(e => (" + LABEL_JS + ")(e).slice(0, 80))""".replace('" + LABEL_JS + "', LABEL_JS))
-    return filled, sorted(set(missing))
+        .filter(e => {
+            if (e.type === 'file' || e.type === 'hidden') return false;
+            const pickerHasValue = x => !!x.closest('[class*=select__control], [class*=-control]')?.querySelector('[class*=single-value], [class*=singleValue], [class*=multi-value]');
+            if (e.matches('[class*=select__input], [role=combobox]') && pickerHasValue(e)) return false;
+            if (e.getAttribute('aria-hidden') === 'true' && e.parentElement && pickerHasValue(e.parentElement.querySelector('input:not([aria-hidden])') || e)) return false;
+            if (!e.matches('input, textarea, select'))  // a group, like an upload box: answered when a file is attached
+                return !([...e.querySelectorAll('input[type=file]')].some(f => f.files.length) || /\\.(pdf|docx?|txt|rtf)\\b/i.test(e.innerText));
+            if (e.offsetParent === null && e.getAttribute('aria-hidden') !== 'true') return false;
+            return !(e.type === 'checkbox' || e.type === 'radio' ? document.querySelector(`input[name="${e.name}"]:checked`) : e.value);
+        })
+        .map(e => (" + LABEL_JS + ")(e).slice(0, 70) + (e.getAttribute('aria-hidden') === 'true' ? ' (pick from the list)' : ''))""".replace('" + LABEL_JS + "', LABEL_JS))
+    out = {}
+    for m in missing:
+        hidden = m.endswith(" (pick from the list)")
+        base = re.sub(r"\s*select\.\.\.$", "", m.removesuffix(" (pick from the list)"), flags=re.I).strip()
+        if base == "A question" and len(missing) > 1:
+            continue
+        key = base.lower()
+        if hidden and key in out:
+            continue  # the hidden copy of a dropdown already listed
+        out.setdefault(key, base + (" (choose from the list)" if hidden else ""))
+    return filled, sorted(out.values())
 
 
 def apply_one(ws, job, submit=True):
@@ -588,7 +698,9 @@ def apply_one(ws, job, submit=True):
     prof, extra = ws.profile(), ws.load("ai_apply_profile", {})
     name = prof.get("name", "").strip()
     first, _, last = name.partition(" ")
-    values = {"name": name, "first": first, "last": last or first, "email": prof.get("email") or C().find_user(uid=ws.uid)["email"], "phone": prof.get("phone", ""), **extra}
+    dial = str(ws.settings().get("country_code") or "").lstrip("+")
+    values = {"name": name, "first": first, "last": last or first, "email": prof.get("email") or C().find_user(uid=ws.uid)["email"],
+              "phone": prof.get("phone", ""), "dial": dial, "country": COUNTRIES.get(dial, ""), **extra}
     resume = ws.load("ai_match", {}).get("want", {}).get("resume") or next(
         (d["name"] for d in ws.documents() if d["name"].lower().endswith(".pdf") and "cover" not in d["name"].lower()), "")
     data = ws.doc_bytes(resume) if resume else None
@@ -596,7 +708,7 @@ def apply_one(ws, job, submit=True):
         return {"state": "needs_you", "detail": "Upload your resume as a PDF first."}
     url = apply_url(job)
     from features.finder import host_is_public
-    if not ATS_URL.search(job["url"]) or not host_is_public(urlsplit(url).hostname or ""):
+    if (urlsplit(url).hostname or "") not in APPLY_HOSTS or not host_is_public(urlsplit(url).hostname or ""):
         return {"state": "needs_you", "detail": "This job isn't on a supported application site."}
     with tempfile.TemporaryDirectory(prefix="reachout-apply-") as tmp:
         path = os.path.join(tmp, re.sub(r"[^\w.\-]", "_", resume) or "resume.pdf")
@@ -608,6 +720,10 @@ def apply_one(ws, job, submit=True):
             try:
                 page = browser.new_page(user_agent=C().USER_AGENT)
                 page.goto(url, timeout=45000, wait_until="domcontentloaded")
+                try:  # the form only reacts to a file or typing once its scripts have loaded
+                    page.wait_for_load_state("networkidle", timeout=20000)
+                except Exception:
+                    pass
                 try:
                     page.wait_for_selector("input[type=file]", state="attached", timeout=15000)
                 except Exception:
@@ -623,7 +739,9 @@ def apply_one(ws, job, submit=True):
                 if "Resume" not in filled:
                     return {"state": "needs_you", "detail": "Couldn't find where to attach your resume.", "url": url}
                 if missing:
-                    return {"state": "needs_you", "url": url, "detail": "Has questions only you can answer: " + "; ".join(missing[:4])}
+                    more = f" and {len(missing) - 4} more" if len(missing) > 4 else ""
+                    return {"state": "needs_you", "url": url, "detail": f"Filled {len(filled)} fields. Questions only you can answer: "
+                            + "; ".join(missing[:4]) + more}
                 if challenge_visible(page):
                     return {"state": "needs_you", "url": url, "detail": "The form shows a CAPTCHA, so finish it yourself."}
                 if not submit:
