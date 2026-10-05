@@ -3210,6 +3210,7 @@ from features import github as feature_github  # noqa: E402
 from features import jobs as feature_jobs  # noqa: E402
 from features import linkedin as feature_linkedin  # noqa: E402
 from features import notify as feature_notify  # noqa: E402
+from features import finder as feature_finder  # noqa: E402
 from features import portfolio as feature_portfolio  # noqa: E402
 from features import site as feature_site  # noqa: E402
 from features import replies as feature_replies  # noqa: E402
@@ -3218,7 +3219,7 @@ bridge.setup(sys.modules[__name__])
 feature_notify.init()
 feature_inbox.ensure_indexes()
 feature_replies.init()
-for _bp in (feature_github.bp, feature_jobs.bp, feature_linkedin.bp, feature_apps.bp, feature_notify.bp, feature_inbox.bp, feature_replies.bp, feature_portfolio.bp, feature_site.bp):
+for _bp in (feature_github.bp, feature_jobs.bp, feature_linkedin.bp, feature_apps.bp, feature_notify.bp, feature_inbox.bp, feature_replies.bp, feature_portfolio.bp, feature_site.bp, feature_finder.bp):
     app.register_blueprint(_bp)
 
 if os.environ.get("BOUNCE_WATCH", "1") == "1":

@@ -4,6 +4,8 @@ Reachout helps people run their outreach and job search from one place:
 
 - **Outreach**: import contacts, write one message with `{name}`/`{company}` placeholders, and send everyone a
   personal copy by email (and optionally WhatsApp), with attachments, from their **own** accounts.
+- **Email finder**: give company websites (typed in or as a CSV/Excel list) and Reachout reads each site's
+  pages for the HR and careers addresses it publishes (hr@, careers@, jobs@…), ready to save as contacts.
 - **Replies**: reads the user's mailbox read-only, matches replies to what they sent, works out what the person
   wants (interested, asks for résumé, wants a call…) and suggests an answer they can send from the app.
 - **Career**: turns application emails (applied → review → assessment → interview → offer) into one timeline per
