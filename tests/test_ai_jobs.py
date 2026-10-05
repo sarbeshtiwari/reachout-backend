@@ -152,3 +152,41 @@ def test_live_view_and_hand_over_rules(user, monkeypatch):
                                        ("your linkedin url", "linkedin"), ("github profile link", "github"), ("link to your portfolio", "portfolio")])
 def test_profile_link_questions_are_filled(label, key):
     assert next((k for pat, k in AI.FIELD_MAP if AI.re.search(pat, label)), None) == key
+
+
+# ---------------------------------------------------------------- answer bank (supervised)
+
+def test_saved_answers_match_reworded_questions_and_respect_company(user):
+    ws = user["ws"]
+    AI.save_answer(ws, "Will you require sponsorship for employment visa status now or in the future?", "No")
+    AI.save_answer(ws, "Are you a current government official?", "No")
+    AI.save_answer(ws, "Why do you want to work at Notion?", "Because of {company}'s craft.", company="Notion")
+    bank = ws.load("ai_answers", {})
+    assert AI.answer_for(bank, "Will you require sponsorship for employment visa status now or in the future? *", "Coinbase") == "No"
+    assert AI.answer_for(bank, "Are you a close relative of a government official?", "Coinbase") is None  # a different question
+    assert AI.answer_for(bank, "Why do you want to work with Notion?", "Notion") == "Because of Notion's craft."
+    assert AI.answer_for(bank, "Why do you want to work with Stripe?", "Stripe") is None  # Notion's answer never goes elsewhere
+
+
+def test_learned_answers_wait_for_approval(user):
+    ws = user["ws"]
+    row = AI.save_answer(ws, "How did you hear about this job?", "LinkedIn", status="review", source="learned", learned_from="Acme · Dev")
+    assert AI.answer_for(ws.load("ai_answers", {}), "How did you hear about this job?", "Acme") is None
+    c = user["client"]
+    assert c.get("/api/ai-jobs/answers").get_json()["answers"][0]["status"] == "review"
+    assert c.post("/api/ai-jobs/answers/approve-all", json={}, headers=H).get_json()["approved"] == 1
+    assert AI.answer_for(ws.load("ai_answers", {}), "How did you hear about this job", "Acme") == "LinkedIn"
+    # answering differently later asks again instead of silently replacing
+    AI.save_answer(ws, "How did you hear about this job?", "Referral", status="review", source="learned", aid=row["id"])
+    assert ws.load("ai_answers", {})[row["id"]]["status"] == "review"
+
+
+def test_answer_bank_api(user):
+    c = user["client"]
+    r = c.post("/api/ai-jobs/answers", json={"question": "Notice period", "answer": "30 days"}, headers=H).get_json()["answer"]
+    assert r["status"] == "approved"
+    r = c.put(f"/api/ai-jobs/answers/{r['id']}", json={"answer": "15 days"}, headers=H).get_json()["answer"]
+    assert r["answer"] == "15 days"
+    assert c.post("/api/ai-jobs/answers", json={"question": "", "answer": "x"}, headers=H).status_code == 400
+    assert c.delete(f"/api/ai-jobs/answers/{r['id']}", headers=H).status_code == 200
+    assert c.get("/api/ai-jobs/answers").get_json()["answers"] == []

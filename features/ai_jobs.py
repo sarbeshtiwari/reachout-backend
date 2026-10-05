@@ -671,6 +671,182 @@ REMAINING_JS = """(mark) => [...document.querySelectorAll('input[required], text
             return (" + LABEL_JS + ")(e).slice(0, 70) + (e.getAttribute('aria-hidden') === 'true' ? ' (pick from the list)' : '') })""".replace('" + LABEL_JS + "', LABEL_JS)
 
 
+# ================================================================= the user's answer bank (supervised)
+# Answers the user wrote, or answers Reachout learned from forms they filled in themselves. Learned and drafted
+# answers wait for the user's approval ("review"); only approved answers are ever typed into a form.
+
+ANS_STOP = set("a an the to of in for and or your you are is do does did have has with this that what which how why "
+               "please describe tell us about at on any".split())
+
+
+def norm_q(text, company=""):
+    t = (text or "").lower().replace("✱", " ").replace("*", " ")
+    t = re.sub(r"\((optional|required)\)|select\.\.\.", " ", t)
+    if company and len(company) > 2:
+        t = re.sub(rf"\b{re.escape(company.lower())}\b", " {company} ", t)
+    t = re.sub(r"[^a-z0-9{} ]+", " ", t)
+    return " ".join(t.split())
+
+
+def q_score(a, b):
+    if a == b:
+        return 1.0
+    from difflib import SequenceMatcher
+    ta = {w for w in a.split() if w not in ANS_STOP and len(w) > 1}
+    tb = {w for w in b.split() if w not in ANS_STOP and len(w) > 1}
+    jac = len(ta & tb) / len(ta | tb) if ta and tb else 0.0
+    return max(jac, SequenceMatcher(None, a, b).ratio() * 0.95)
+
+
+def same_company(a, b):
+    a, b = (a or "").lower().strip(), (b or "").lower().strip()
+    return bool(a and b and (a in b or b in a))
+
+
+def answer_for(bank, label, company):
+    """The user's approved answer to this question, or None. Company-specific answers only go to that company."""
+    q = norm_q(label, company)
+    if len(q) < 2:
+        return None
+    best, best_s = None, 0.0
+    for a in bank.values():
+        if a.get("status") != "approved" or not a.get("answer"):
+            continue
+        if a.get("company") and not same_company(a["company"], company):
+            continue
+        sc = q_score(q, a.get("norm") or norm_q(a["question"], a.get("company", "")))
+        if sc > best_s:
+            best, best_s = a, sc
+    if best and best_s >= 0.8:
+        return best["answer"].replace("{company}", company or "your company")
+    return None
+
+
+def save_answer(ws, question, answer, company="", status="approved", source="you", learned_from="", aid=None):
+    with ws.lock:
+        bank = ws.load("ai_answers", {})
+        norm = norm_q(question, company)
+        if not aid:  # same question already saved: update it instead of adding a copy
+            aid = next((k for k, v in bank.items() if v.get("norm") == norm and (v.get("company") or "").lower() == (company or "").lower()), None)
+        if aid and aid in bank and source == "learned" and bank[aid].get("status") == "approved" and bank[aid].get("answer") == answer:
+            return bank[aid]
+        aid = aid or C().new_id()
+        old = bank.get(aid, {})
+        if source == "learned" and old.get("status") == "approved" and old.get("answer") != answer:
+            status = "review"  # the user answered differently this time: ask which one to keep
+        bank[aid] = {"id": aid, "question": question[:300], "answer": answer[:4000], "company": company[:80], "norm": norm,
+                     "status": status, "source": source, "learned_from": learned_from[:120], "updated": time.time(),
+                     "uses": old.get("uses", 0)}
+        ws.save("ai_answers", bank)
+        return bank[aid]
+
+
+SNAPSHOT_JS = """() => {
+  const t = x => (x || '').replace(/[✱*]/g, '').replace(/\\s+/g, ' ').trim();
+  const lab = e => (""" + LABEL_JS + """)(e);
+  const out = [];
+  document.querySelectorAll('textarea, input[type=text], input:not([type])').forEach(e => {
+    if (e.offsetParent === null || e.matches('[class*=select__input], [role=combobox], [type=search]') || !e.value.trim()) return;
+    out.push([lab(e), e.value.trim()]);
+  });
+  document.querySelectorAll('[class*=select__control], [class*=-control]').forEach(c => {
+    const v = c.querySelector('[class*=single-value], [class*=singleValue]'); const i = c.querySelector('input');
+    if (v && i && !c.closest('.iti')) out.push([lab(i), t(v.innerText)]);
+  });
+  document.querySelectorAll('select').forEach(e => { if (e.offsetParent !== null && e.value && e.selectedIndex > 0) out.push([lab(e), t(e.options[e.selectedIndex].text)]); });
+  const seen = new Set();
+  document.querySelectorAll('input[type=radio]:checked, input[type=checkbox]:checked').forEach(e => {
+    const box = e.closest('fieldset, [role=radiogroup], [role=group], li, [class*=question], [class*=field]');
+    const q = box ? t((box.querySelector('legend, label, [class*=label]') || {}).innerText) : '';
+    const a = e.type === 'checkbox' && box && box.querySelectorAll('input[type=checkbox]').length === 1 ? 'Yes' : t(e.labels && e.labels[0] ? e.labels[0].innerText : e.value);
+    const k = q + '|' + e.name; if (!q || seen.has(k)) return; seen.add(k); out.push([q, a]);
+  });
+  document.querySelectorAll('button[aria-pressed=true], [role=radio][aria-checked=true]').forEach(e => {
+    const box = e.closest('fieldset, [role=radiogroup], [class*=question], [class*=field]');
+    const q = box ? t((box.querySelector('legend, label, [class*=label]') || {}).innerText) : '';
+    if (q) out.push([q, t(e.innerText)]);
+  });
+  return out.filter(([q, a]) => q && a && q.length < 300);
+}"""
+
+
+def learn_from_page(ws, page, job):
+    """Remember the answers the user typed themselves in this form, for their review (never used before approval)."""
+    try:
+        pairs = page.evaluate(SNAPSHOT_JS)
+    except Exception:
+        return 0
+    n = 0
+    for q, a in pairs:
+        ql = q.lower().strip(" ?:")
+        if any(re.search(pat, ql) for pat, _ in FIELD_MAP) or re.search(r"resume|cover letter|password|captcha", ql):
+            continue  # contact details and files come from the profile already
+        specific = bool(job.get("company")) and job["company"].lower() in q.lower()
+        save_answer(ws, q, a, job["company"] if specific else "", status="review", source="learned",
+                    learned_from=f"{job['company']} · {job['title']}")
+        n += 1
+    return n
+
+
+def fill_from_bank(page, answers, company, live):
+    """Answer questions with the user's approved answers: text, dropdowns, radio groups and Yes/No buttons."""
+    done = []
+    if not answers:
+        return done
+    for el in page.locator(TEXT_BOXES).all():
+        try:
+            if not el.is_visible() or el.input_value():
+                continue
+            label = el.evaluate("e => (" + LABEL_JS + ")(e)") or ""
+            ans = answer_for(answers, label, company)
+            if ans:
+                el.scroll_into_view_if_needed(timeout=2000)
+                el.fill(ans, timeout=5000); done.append(label[:60]); live(page, f"Answered “{label[:50]}”")
+        except Exception:
+            continue
+    boxes = page.evaluate("""() => [...document.querySelectorAll('input[class*=select__input], input[role=combobox]')]
+        .filter(e => e.id && e.offsetParent !== null && !e.closest('.iti')
+                && !e.closest('[class*=select__control], [class*=-control]')?.querySelector('[class*=single-value], [class*=singleValue]'))
+        .map(e => [e.id, (""" + LABEL_JS + """)(e)])""")
+    for bid, label in boxes:
+        ans = answer_for(answers, label, company)
+        if ans and pick(page, page.locator(f"[id='{bid}']"), ans):
+            done.append(label[:60]); live(page, f"Answered “{label[:50]}”")
+    for sel in page.locator("select").all():
+        try:
+            if not sel.is_visible() or sel.evaluate("e => e.selectedIndex > 0"):
+                continue
+            label = sel.evaluate("e => (" + LABEL_JS + ")(e)") or ""
+            ans = answer_for(answers, label, company)
+            if ans:
+                sel.select_option(label=ans, timeout=3000); done.append(label[:60]); live(page, f"Answered “{label[:50]}”")
+        except Exception:
+            continue
+    groups = page.evaluate("""() => {
+        const t = x => (x || '').replace(/[✱*]/g, '').replace(/\\s+/g, ' ').trim(); const out = []; let n = 0;
+        document.querySelectorAll('fieldset, [role=radiogroup]').forEach(g => {
+          if (g.offsetParent === null || g.querySelector('input:checked, [aria-checked=true], [aria-pressed=true]')) return;
+          const q = t((g.querySelector('legend, label, [class*=label]') || {}).innerText);
+          if (!q) return; g.setAttribute('data-ro-group', String(++n)); out.push([String(n), q]);
+        });
+        return out; }""")
+    for gid, label in groups:
+        ans = answer_for(answers, label, company)
+        if not ans:
+            continue
+        g = page.locator(f"[data-ro-group='{gid}']")
+        opt = g.locator("label, button, [role=radio]").filter(has_text=re.compile(rf"^\s*{re.escape(ans)}\s*$", re.I)).first
+        try:
+            if opt.count():
+                opt.scroll_into_view_if_needed(timeout=2000); opt.click(timeout=3000)
+                done.append(label[:60]); live(page, f"Answered “{label[:50]}”")
+            elif re.fullmatch(r"yes|i agree|agree|true", ans.strip(), re.I) and g.locator("input[type=checkbox]").count() == 1:
+                g.locator("input[type=checkbox]").first.check(timeout=3000); done.append(label[:60])
+        except Exception:
+            continue
+    return done
+
+
 def questions_left(page, mark=False):
     """Required questions still unanswered, one entry per question (a dropdown's hidden copy isn't counted twice)."""
     out = {}
@@ -687,7 +863,7 @@ def questions_left(page, mark=False):
     return sorted(out.values())
 
 
-def fill_form(page, values, resume_path, live=lambda page, step="": None):
+def fill_form(page, values, resume_path, live=lambda page, step="": None, answers=None, company=""):
     """Fill what we can from the user's own details; return the labels of required questions left empty."""
     filled = []
     files = page.locator("input[type=file]")
@@ -728,6 +904,8 @@ def fill_form(page, values, resume_path, live=lambda page, step="": None):
     filled += picked
     if picked:
         live(page, "Chose " + ", ".join(picked))
+    from_bank = fill_from_bank(page, answers, company, live)
+    filled += [f"answer: {x}" for x in from_bank]
     missing = questions_left(page)
     return filled, missing
 
@@ -803,7 +981,7 @@ def apply_one(ws, job, submit=True, visible=False):
                 if not open_form(page, job, url, live):
                     live(page, "This job is no longer open")
                     return {"state": "closed", "url": url, "detail": "This job is no longer open."}
-                filled, missing = fill_form(page, values, path, live)
+                filled, missing = fill_form(page, values, path, live, ws.load("ai_answers", {}), job.get("company", ""))
                 filled = [re.sub(r"\s+", " ", f).strip() for f in filled]
                 if "Resume" not in filled:
                     live(page, "Couldn't find where to attach your resume")
@@ -958,7 +1136,10 @@ def watch_apply(w, ws, job, values, path):
                 return {"state": "needs_you", "url": url, "detail": "Skipped at the sign-in step."}
             if not page.locator("input[type=file]").count():
                 open_form(page, job, url, live)
-        filled, missing = fill_form(page, values, path, live)
+        filled, missing = fill_form(page, values, path, live, ws.load("ai_answers", {}), job.get("company", ""))
+        used = [f for f in filled if f.startswith("answer: ")]
+        if used:
+            w.bar(page, f"Used {len(used)} of your saved answers")
         if "Resume" not in filled:
             a = w.wait_for_user(page, live, "Attach your resume in this form, then press Continue.")
             if a in ("skip", "closed", "timeout"):
@@ -971,7 +1152,20 @@ def watch_apply(w, ws, job, values, path):
             page.evaluate("() => document.querySelector('[style*=\"e5484d\"]')?.scrollIntoView({behavior: 'smooth', block: 'center'})")
             msg = (f"{left} question{'s' if left != 1 else ''} only you can answer (outlined in red). Answer them, then press Continue."
                    if left else "Solve the CAPTCHA, then press Continue.")
-            a = w.wait_for_user(page, live, msg, done=lambda p: bool(CONFIRMED.search(p.locator("body").inner_text(timeout=3000))))
+            snap = {"n": 0}
+
+            def submitted(p, snap=snap):
+                if CONFIRMED.search(p.locator("body").inner_text(timeout=3000)):
+                    return True
+                snap["n"] += 1
+                if snap["n"] % 5 == 0:  # keep a recent copy of what the user typed, in case they submit themselves
+                    learn_from_page(ws, p, job)
+                return False
+            a = w.wait_for_user(page, live, msg, done=submitted)
+            if a == "continue":
+                n = learn_from_page(ws, page, job)
+                if n:
+                    live(page, f"Saved {n} of your answers for review")
             if a == "done":
                 live(page, "Submitted ✓")
                 return {"state": "applied", "url": url, "detail": "You submitted it in the Reachout window."}
@@ -1129,4 +1323,67 @@ def finish(ws, jid):
     HANDOVER[ws.uid] = jid
     APPLYING[ws.uid] = {"state": "running", "total": 1, "done": 0, "current": job["title"], "visible": True}
     threading.Thread(target=run_watch, args=(ws.uid, [job]), daemon=True, name="ai-watch").start()
+    return jsonify(ok=True)
+
+
+def answer_out(a):
+    return {k: a.get(k) for k in ("id", "question", "answer", "company", "status", "source", "learned_from", "updated")}
+
+
+@bp.get("/api/ai-jobs/answers")
+@login_required
+def list_answers(ws):
+    bank = ws.load("ai_answers", {})
+    rows = sorted(bank.values(), key=lambda a: (a.get("status") != "review", -a.get("updated", 0)))
+    return jsonify(answers=[answer_out(a) for a in rows])
+
+
+@bp.post("/api/ai-jobs/answers")
+@login_required
+def add_answer(ws):
+    core, p = C(), C().body()
+    q = core.v_text(p.get("question"), "question", "Question", 300, required=True)
+    a = core.v_text(p.get("answer"), "answer", "Answer", 4000, required=True)
+    company = core.v_text(p.get("company"), "company", "Company", 80)
+    if len(ws.load("ai_answers", {})) >= 500:
+        raise core.Invalid("You can save up to 500 answers. Remove some first.")
+    return jsonify(answer=answer_out(save_answer(ws, q, a, company)))
+
+
+@bp.put("/api/ai-jobs/answers/<aid>")
+@login_required
+def edit_answer(ws, aid):
+    core, p = C(), C().body()
+    bank = ws.load("ai_answers", {})
+    if aid not in bank:
+        raise core.Invalid("That answer no longer exists.", status=404)
+    cur = bank[aid]
+    q = core.v_text(p.get("question", cur["question"]), "question", "Question", 300, required=True)
+    a = core.v_text(p.get("answer", cur["answer"]), "answer", "Answer", 4000, required=True)
+    company = core.v_text(p.get("company", cur.get("company", "")), "company", "Company", 80)
+    status = "approved" if p.get("approve", cur["status"] == "approved") else cur["status"]
+    row = save_answer(ws, q, a, company, status=status, source=cur.get("source", "you"), learned_from=cur.get("learned_from", ""), aid=aid)
+    return jsonify(answer=answer_out(row))
+
+
+@bp.post("/api/ai-jobs/answers/approve-all")
+@login_required
+def approve_all(ws):
+    with ws.lock:
+        bank = ws.load("ai_answers", {})
+        n = 0
+        for a in bank.values():
+            if a.get("status") == "review" and a.get("answer"):
+                a["status"], n = "approved", n + 1
+        ws.save("ai_answers", bank)
+    return jsonify(approved=n)
+
+
+@bp.delete("/api/ai-jobs/answers/<aid>")
+@login_required
+def delete_answer(ws, aid):
+    with ws.lock:
+        bank = ws.load("ai_answers", {})
+        bank.pop(aid, None)
+        ws.save("ai_answers", bank)
     return jsonify(ok=True)
