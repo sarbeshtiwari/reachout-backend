@@ -106,7 +106,7 @@ def test_auto_apply_needs_consent_and_records_the_application(user, monkeypatch)
     assert c.put("/api/ai-jobs/details", json={"linkedin": "https://linkedin.com/in/me", "consent": True}, headers=H).get_json()["consent"]
     assert c.put("/api/ai-jobs/details", json={"linkedin": "javascript:alert(1)"}, headers=H).status_code == 400
     ws.save("profile", {**ws.profile(), "phone": "+919999999999"})
-    monkeypatch.setattr(AI, "apply_one", lambda ws, job, submit=True: {"state": "applied", "detail": "Application submitted.", "url": job["url"]})
+    monkeypatch.setattr(AI, "apply_one", lambda ws, job, submit=True, visible=False: {"state": "applied", "detail": "Application submitted.", "url": job["url"]})
     assert c.post("/api/ai-jobs/apply", json={"ids": [JOBS[0]["id"]]}, headers=H).status_code == 200
     for _ in range(100):
         if AI.APPLYING[ws.uid]["state"] != "running":
@@ -132,3 +132,17 @@ def test_greenhouse_jobs_apply_on_greenhouse_even_when_shown_on_the_company_site
 def test_only_contact_fields_are_filled_never_questions(label, key):
     hit = next((k for pat, k in AI.FIELD_MAP if AI.re.search(pat, label)), None)
     assert hit == key
+
+
+def test_live_view_and_hand_over_rules(user, monkeypatch):
+    c, ws = user["client"], user["ws"]
+    assert c.get("/api/ai-jobs/live").get_json() == {"active": False}
+    AI.LIVE[ws.uid] = {"frame": b"\xff\xd8jpeg", "log": ["Attached your resume"], "job": "Dev · Acme", "at": time.time(), "url": ""}
+    st = c.get("/api/ai-jobs/live").get_json()
+    assert st["active"] and st["frame"].startswith("data:image/jpeg;base64,") and st["log"] == ["Attached your resume"]
+    other = __import__("conftest").client_for(__import__("conftest").make_user()[0])
+    assert other.get("/api/ai-jobs/live").get_json() == {"active": False}  # never another user's screen
+    monkeypatch.setattr(AI.C(), "PRODUCTION", True)
+    r = c.post(f"/api/ai-jobs/finish/{JOBS[0]['id']}", json={}, headers=H)
+    assert r.status_code == 400 and "your own computer" in r.get_json()["error"]
+    AI.LIVE.pop(ws.uid, None)

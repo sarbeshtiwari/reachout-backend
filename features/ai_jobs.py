@@ -55,6 +55,8 @@ ATS_URL = re.compile(r"https?://(?:job-boards|boards)(?:\.eu)?\.greenhouse\.io/(
                      r"|https?://jobs\.ashbyhq\.com/(?P<ab>[\w.-]+)/(?P<abid>[0-9a-f-]{36})", re.I)
 
 RUNS, APPLYING = {}, {}
+LIVE = {}                          # uid -> {"frame": jpeg bytes, "log": [...], "job": title, "at": t}
+HANDOVER = {}                      # uid -> job id of the window left open on the user's Mac
 APPLY_LOCK = threading.Lock()      # one browser at a time on this server
 
 
@@ -441,7 +443,8 @@ def public_state(ws):
     return out | {"keys": {"tavily": bool(keys.get("tavily")), "brave": bool(keys.get("brave"))}, "local_model": ollama_ready(),
                   "model_name": OLLAMA_MODEL, "resumes": [d["name"] for d in ws.documents() if d["name"].lower().endswith(".pdf")],
                   "details": ws.load("ai_apply_profile", {}), "consent": bool(ws.settings().get("auto_apply_consent")),
-                  "applying": APPLYING.get(ws.uid, {}), "apply_per_day": APPLY_PER_DAY}
+                  "applying": APPLYING.get(ws.uid, {}), "apply_per_day": APPLY_PER_DAY,
+                  "can_hand_over": can_hand_over(), "handover": HANDOVER.get(ws.uid, "")}
 
 
 @bp.get("/api/ai-jobs")
@@ -631,7 +634,28 @@ def fill_pickers(page, values):
     return done
 
 
-def fill_form(page, values, resume_path):
+class Live:
+    """Shows what the browser is doing: a screenshot after each step, plus a short log (for the live view)."""
+
+    def __init__(self, uid, job):
+        self.uid = uid
+        LIVE[uid] = {"frame": b"", "log": [], "job": f"{job['title']} · {job['company']}", "at": time.time(), "url": ""}
+
+    def __call__(self, page, step=""):
+        st = LIVE.get(self.uid)
+        if st is None:
+            return
+        if step:
+            st["log"] = (st["log"] + [step])[-14:]
+        try:
+            st["frame"] = page.screenshot(type="jpeg", quality=55, timeout=5000)
+            st["url"] = page.url
+        except Exception:
+            pass
+        st["at"] = time.time()
+
+
+def fill_form(page, values, resume_path, live=lambda page, step="": None):
     """Fill what we can from the user's own details; return the labels of required questions left empty."""
     filled = []
     files = page.locator("input[type=file]")
@@ -641,7 +665,7 @@ def fill_form(page, values, resume_path):
         if "cover" in attrs:
             continue
         if "resume" in attrs or "cv" in attrs or i == 0:
-            f.set_input_files(resume_path); filled.append("Resume"); break
+            f.set_input_files(resume_path); filled.append("Resume"); live(page, "Attached your resume"); break
     if filled:  # some forms read the resume and refill (and reset) the fields; let that finish first
         try:
             page.wait_for_load_state("networkidle", timeout=10000)
@@ -662,11 +686,16 @@ def fill_form(page, values, resume_path):
         for pat, key in FIELD_MAP:
             if re.search(pat, label) and values.get(key):
                 try:
+                    el.scroll_into_view_if_needed(timeout=2000)
                     el.fill(values[key], timeout=5000); filled.append(label)
+                    live(page, f"Filled {label}")
                 except Exception:
                     pass
                 break
-    filled += fill_pickers(page, values)
+    picked = fill_pickers(page, values)
+    filled += picked
+    if picked:
+        live(page, "Chose " + ", ".join(picked))
     missing = page.evaluate("""() => [...document.querySelectorAll('input[required], textarea[required], select[required], [aria-required=true]')]
         .filter(e => {
             if (e.type === 'file' || e.type === 'hidden') return false;
@@ -692,71 +721,170 @@ def fill_form(page, values, resume_path):
     return filled, sorted(out.values())
 
 
-def apply_one(ws, job, submit=True):
-    """Open the job's public application form, fill it and (when nothing is left to answer) submit it."""
-    from playwright.sync_api import sync_playwright
+def apply_values(ws):
     prof, extra = ws.profile(), ws.load("ai_apply_profile", {})
     name = prof.get("name", "").strip()
     first, _, last = name.partition(" ")
     dial = str(ws.settings().get("country_code") or "").lstrip("+")
-    values = {"name": name, "first": first, "last": last or first, "email": prof.get("email") or C().find_user(uid=ws.uid)["email"],
-              "phone": prof.get("phone", ""), "dial": dial, "country": COUNTRIES.get(dial, ""), **extra}
+    return {"name": name, "first": first, "last": last or first, "email": prof.get("email") or C().find_user(uid=ws.uid)["email"],
+            "phone": prof.get("phone", ""), "dial": dial, "country": COUNTRIES.get(dial, ""), **extra}
+
+
+def resume_file(ws):
     resume = ws.load("ai_match", {}).get("want", {}).get("resume") or next(
         (d["name"] for d in ws.documents() if d["name"].lower().endswith(".pdf") and "cover" not in d["name"].lower()), "")
-    data = ws.doc_bytes(resume) if resume else None
+    return resume, (ws.doc_bytes(resume) if resume else None)
+
+
+def can_hand_over():
+    """A visible browser window can only be opened when Reachout runs on the user's own computer."""
+    import platform
+    return not C().PRODUCTION and (platform.system() in ("Darwin", "Windows") or bool(os.environ.get("DISPLAY")))
+
+
+CONFIRMED = re.compile(r"thank you for applying|thanks for applying|application (has been )?(received|submitted)|"
+                       r"we('ve| have) received your application|successfully submitted", re.I)
+
+
+def open_form(page, job, url, live):
+    page.goto(url, timeout=45000, wait_until="domcontentloaded")
+    live(page, "Opened the application form")
+    try:  # the form only reacts to a file or typing once its scripts have loaded
+        page.wait_for_load_state("networkidle", timeout=20000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_selector("input[type=file]", state="attached", timeout=15000)
+    except Exception:
+        pass
+    page.wait_for_timeout(1000)
+    if re.search(r"page not found|no longer (open|available|accepting)|position has been filled|job (is )?closed",
+                 page.locator("body").inner_text()[:3000], re.I):
+        return False
+    if job["ats"] == "greenhouse" and page.locator("button:has-text('Apply')").count() and not page.locator("input[type=file]").count():
+        page.locator("button:has-text('Apply')").first.click(); page.wait_for_timeout(1500)
+    return True
+
+
+def apply_one(ws, job, submit=True, visible=False):
+    """Open the job's public application form, fill it and (when nothing is left to answer) submit it.
+
+    visible=True (only when Reachout runs on the user's computer) does it in a browser window they can watch."""
+    from playwright.sync_api import sync_playwright
+    values = apply_values(ws)
+    resume, data = resume_file(ws)
     if not data:
         return {"state": "needs_you", "detail": "Upload your resume as a PDF first."}
     url = apply_url(job)
     from features.finder import host_is_public
     if (urlsplit(url).hostname or "") not in APPLY_HOSTS or not host_is_public(urlsplit(url).hostname or ""):
         return {"state": "needs_you", "detail": "This job isn't on a supported application site."}
+    live = Live(ws.uid, job)
     with tempfile.TemporaryDirectory(prefix="reachout-apply-") as tmp:
         path = os.path.join(tmp, re.sub(r"[^\w.\-]", "_", resume) or "resume.pdf")
         with open(path, "wb") as f:
             f.write(data)
         with APPLY_LOCK, sync_playwright() as pw:
             args = ["--no-sandbox"] if C().NO_SANDBOX else []
-            browser = pw.chromium.launch(headless=True, args=args)
+            browser = pw.chromium.launch(headless=not (visible and can_hand_over()), args=args, slow_mo=120 if visible else 0)
             try:
-                page = browser.new_page(user_agent=C().USER_AGENT)
-                page.goto(url, timeout=45000, wait_until="domcontentloaded")
-                try:  # the form only reacts to a file or typing once its scripts have loaded
-                    page.wait_for_load_state("networkidle", timeout=20000)
-                except Exception:
-                    pass
-                try:
-                    page.wait_for_selector("input[type=file]", state="attached", timeout=15000)
-                except Exception:
-                    pass
-                page.wait_for_timeout(1000)
-                if re.search(r"page not found|no longer (open|available|accepting)|position has been filled|job (is )?closed",
-                             page.locator("body").inner_text()[:3000], re.I):
+                page = browser.new_page(user_agent=C().USER_AGENT, viewport={"width": 1100, "height": 860})
+                if not open_form(page, job, url, live):
+                    live(page, "This job is no longer open")
                     return {"state": "closed", "url": url, "detail": "This job is no longer open."}
-                if job["ats"] == "greenhouse" and page.locator("button:has-text('Apply')").count() and not page.locator("input[type=file]").count():
-                    page.locator("button:has-text('Apply')").first.click(); page.wait_for_timeout(1500)
-                filled, missing = fill_form(page, values, path)
+                filled, missing = fill_form(page, values, path, live)
                 filled = [re.sub(r"\s+", " ", f).strip() for f in filled]
                 if "Resume" not in filled:
+                    live(page, "Couldn't find where to attach your resume")
                     return {"state": "needs_you", "detail": "Couldn't find where to attach your resume.", "url": url}
                 if missing:
                     more = f" and {len(missing) - 4} more" if len(missing) > 4 else ""
-                    return {"state": "needs_you", "url": url, "detail": f"Filled {len(filled)} fields. Questions only you can answer: "
-                            + "; ".join(missing[:4]) + more}
+                    live(page, f"Stopped: {len(missing)} question{'s' if len(missing) != 1 else ''} only you can answer")
+                    return {"state": "needs_you", "url": url, "questions": missing[:40], "filled": filled,
+                            "detail": f"Filled {len(filled)} fields. Questions only you can answer: " + "; ".join(missing[:4]) + more}
                 if challenge_visible(page):
+                    live(page, "Stopped: the form shows a CAPTCHA")
                     return {"state": "needs_you", "url": url, "detail": "The form shows a CAPTCHA, so finish it yourself."}
                 if not submit:
+                    live(page, "Everything is filled")
                     return {"state": "ready", "url": url, "detail": f"Filled: {', '.join(filled)}."}
                 btn = page.locator("button[type=submit], input[type=submit], button:has-text('Submit application'), button:has-text('Submit')").first
+                btn.scroll_into_view_if_needed(timeout=3000)
+                live(page, "Submitting…")
                 btn.click()
                 page.wait_for_timeout(6000)
-                body = page.locator("body").inner_text().lower()
-                if re.search(r"thank you|thanks for applying|application (has been )?(received|submitted)|we('ve| have) received", body):
+                live(page, "")
+                if CONFIRMED.search(page.locator("body").inner_text()):
+                    live(page, "Submitted ✓")
                     return {"state": "applied", "url": url, "detail": "Application submitted."}
                 if challenge_visible(page):
+                    live(page, "Stopped: a CAPTCHA appeared on submit")
                     return {"state": "needs_you", "url": url, "detail": "A CAPTCHA appeared on submit, so finish it yourself."}
                 return {"state": "needs_you", "url": url, "detail": "Submitted, but no confirmation appeared. Check the page."}
             finally:
                 browser.close()
+
+
+def hand_over(uid, job):
+    """Fill the form in a browser window on the user's computer and leave it open for them to answer the rest and
+    submit. Reachout never submits here; it watches for the confirmation page and records the application."""
+    from playwright.sync_api import sync_playwright
+    ws = C().Workspace(uid)
+    values = apply_values(ws)
+    resume, data = resume_file(ws)
+    live = Live(uid, job)
+    url = apply_url(job)
+
+    def save(res):
+        with ws.lock:
+            done = ws.load("ai_applied", {})
+            done[job["id"]] = {**res, "at": time.time()}
+            ws.save("ai_applied", done)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="reachout-apply-") as tmp:
+            path = os.path.join(tmp, re.sub(r"[^\w.\-]", "_", resume) or "resume.pdf")
+            with open(path, "wb") as f:
+                f.write(data)
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=False, slow_mo=80)
+                page = browser.new_page(user_agent=C().USER_AGENT, viewport=None)
+                page.bring_to_front()
+                if not open_form(page, job, url, live):
+                    save({"state": "closed", "url": url, "detail": "This job is no longer open."})
+                    browser.close()
+                    return
+                filled, missing = fill_form(page, values, path, live)
+                save({"state": "with_you", "url": url, "detail": f"Filled {len(filled)} fields in a window on your computer. "
+                      "Answer the rest there and press Submit.", "questions": missing[:40]})
+                live(page, "Your turn: answer the remaining questions in the window and press Submit")
+                ok, deadline = False, time.time() + 45 * 60
+                while time.time() < deadline and not page.is_closed():
+                    try:
+                        page.wait_for_timeout(2500)
+                        if CONFIRMED.search(page.locator("body").inner_text(timeout=3000)):
+                            ok = True
+                            live(page, "Submitted ✓")
+                            page.wait_for_timeout(4000)
+                            break
+                        if int(time.time()) % 10 < 3:
+                            live(page, "")
+                    except Exception:
+                        break
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+        if ok:
+            save({"state": "applied", "url": url, "detail": "You submitted it in the window Reachout filled."})
+            record_application(ws, job)
+        elif (ws.load("ai_applied", {}).get(job["id"]) or {}).get("state") == "with_you":
+            save({"state": "needs_you", "url": url, "detail": "The window was closed before submitting. Press “Fill & finish” to try again."})
+    except Exception as e:
+        print(f"[Reachout] hand-over failed: {e}", flush=True)
+        save({"state": "needs_you", "url": url, "detail": "Couldn't open the browser window. Try again."})
+    finally:
+        HANDOVER.pop(uid, None)
 
 
 def record_application(ws, job):
@@ -772,14 +900,14 @@ def record_application(ws, job):
         ws.save("applications", rows)
 
 
-def run_apply(uid, picks):
+def run_apply(uid, picks, visible=False):
     ws = C().Workspace(uid)
     st = APPLYING[uid]
     try:
         for job in picks:
             st["current"] = job["title"]
             try:
-                res = apply_one(ws, job, submit=True)
+                res = apply_one(ws, job, submit=True, visible=visible)
             except Exception as e:
                 print(f"[Reachout] auto-apply error: {e}", flush=True)
                 res = {"state": "needs_you", "detail": "The application page didn't load as expected. Apply on the site.", "url": job["url"]}
@@ -818,6 +946,41 @@ def apply(ws):
     for _ in picks:
         if core.rate_limited(("ai-apply", ws.uid), APPLY_PER_DAY, 86400):
             raise core.Invalid(f"Reachout AI applies to at most {APPLY_PER_DAY} jobs a day.", status=429)
-    APPLYING[ws.uid] = {"state": "running", "total": len(picks), "done": 0, "current": ""}
-    threading.Thread(target=run_apply, args=(ws.uid, picks), daemon=True, name="ai-apply").start()
+    visible = bool(core.body().get("watch")) and can_hand_over()
+    APPLYING[ws.uid] = {"state": "running", "total": len(picks), "done": 0, "current": "", "visible": visible}
+    threading.Thread(target=run_apply, args=(ws.uid, picks, visible), daemon=True, name="ai-apply").start()
     return jsonify(ok=True, total=len(picks))
+
+
+@bp.get("/api/ai-jobs/live")
+@login_required
+def live_view(ws):
+    """The latest picture of the application browser and what it just did (polled by the page while applying)."""
+    import base64
+    st = LIVE.get(ws.uid)
+    if not st:
+        return jsonify(active=False)
+    busy = (APPLYING.get(ws.uid) or {}).get("state") == "running" or ws.uid in HANDOVER
+    return jsonify(active=busy or time.time() - st["at"] < 120, job=st["job"], log=st["log"], at=st["at"],
+                   frame=("data:image/jpeg;base64," + base64.b64encode(st["frame"]).decode()) if st["frame"] else "")
+
+
+@bp.post("/api/ai-jobs/finish/<jid>")
+@login_required
+def finish(ws, jid):
+    """Open a browser window on this computer with the form filled in, for the user to answer the rest and submit."""
+    core = C()
+    if not can_hand_over():
+        raise core.Invalid("This works when Reachout runs on your own computer. Open the form on the site instead.", status=400)
+    if not ws.settings().get("auto_apply_consent"):
+        raise core.Invalid("Turn on auto-apply and confirm first.", "consent")
+    job = next((r for r in ws.load("ai_match", {}).get("results", []) if r["id"] == jid and r.get("can_apply")), None)
+    if not job:
+        raise core.Invalid("That job isn't in your matches any more.", status=404)
+    if ws.uid in HANDOVER or (APPLYING.get(ws.uid) or {}).get("state") == "running":
+        raise core.Invalid("A form is already open. Finish or close that window first.", status=409)
+    if not resume_file(ws)[1]:
+        raise core.Invalid("Upload your resume as a PDF first.", "resume")
+    HANDOVER[ws.uid] = jid
+    threading.Thread(target=hand_over, args=(ws.uid, job), daemon=True, name="ai-handover").start()
+    return jsonify(ok=True)
