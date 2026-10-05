@@ -204,3 +204,22 @@ def test_a_flagged_site_is_never_automated_again_and_a_kit_is_offered(user, monk
     AI.save_answer(ws, "Why do you want to work with Notion?", "Because of the craft.", company="Notion", status="review", source="draft")
     kit = c.get(f"/api/ai-jobs/kit/{job['id']}").get_json()
     assert kit["url"] == job["url"] and kit["answers"][0]["answer"] == "Because of the craft." and kit["answers"][0]["draft"]
+
+
+# ---------------------------------------------------------------- browser extension
+
+def test_extension_key_scopes_and_revocation(user):
+    c, ws = user["client"], user["ws"]
+    anon = A.app.test_client()
+    assert anon.post("/api/ext/autofill", json={}, headers=H).status_code == 401
+    key = c.post("/api/extension/key", json={}, headers=H).get_json()["key"]
+    auth = {**H, "Authorization": "Bearer " + key}
+    AI.save_answer(ws, "Will you require visa sponsorship?", "No")
+    r = anon.post("/api/ext/autofill", json={"url": "https://jobs.lever.co/acme/x", "questions": ["Will you require visa sponsorship?"]}, headers=auth)
+    assert r.status_code == 200 and r.get_json()["answers"]["Will you require visa sponsorship?"]["answer"] == "No"
+    assert r.get_json()["company"] == "Acme" and r.get_json()["field_map"]
+    assert anon.get("/api/state", headers=auth).status_code == 401  # the key only opens the extension endpoints
+    r = anon.post("/api/ext/learn", json={"url": "https://jobs.lever.co/acme/x", "pairs": [["How did you hear about us?", "LinkedIn"], ["Email", "x@y.z"]]}, headers=auth)
+    assert r.get_json()["saved"] == 1  # contact fields aren't learned
+    assert c.delete("/api/extension/key", headers=H).status_code == 200
+    assert anon.post("/api/ext/autofill", json={}, headers=auth).status_code == 401

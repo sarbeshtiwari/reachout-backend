@@ -14,6 +14,12 @@ Reachout helps people run their outreach and job search from one place:
   - **Brave Search** ($5 free credit/month, about 1,000 searches; a credit card is required): sign up at
     https://api-dashboard.search.brave.com → Subscriptions → choose the Search plan → API Keys → Add API key → copy it into Reachout.
     Set a spending limit if offered; usage beyond the credit is billed.
+- **Reachout Autofill (Chrome extension).** Fills job applications in the user's own browser with their details, resume,
+  location and approved answers; the user checks the form and presses Submit (it never submits, and is not a bot).
+  Source in `frontend/extension/`, downloadable from AI job match → Browser extension (`/downloads/reachout-autofill.zip`).
+  It signs in with a personal extension key (create/revoke in the app), which only opens `/api/ext/*`: read application
+  details, download the resume, match answers to a form's questions, and save typed answers for review.
+  After changing the extension: `cd frontend/extension && zip -qr ../public/downloads/reachout-autofill.zip . -x ".*"`.
 - **Email finder**: give company websites (typed in or as a CSV/Excel list) and Reachout reads each site's
   pages for the HR and careers addresses it publishes (hr@, careers@, jobs@…), ready to save as contacts.
 - **Replies**: reads the user's mailbox read-only, matches replies to what they sent, works out what the person
