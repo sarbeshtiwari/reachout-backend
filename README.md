@@ -4,6 +4,11 @@ Reachout helps people run their outreach and job search from one place:
 
 - **Outreach**: import contacts, write one message with `{name}`/`{company}` placeholders, and send everyone a
   personal copy by email (and optionally WhatsApp), with attachments, from their **own** accounts.
+- **AI job match** (Reachout AI): reads the user's resume, searches company career sites (Greenhouse, Lever,
+  Ashby; no key) and optionally Tavily/Brave web search (each user's own key), ranks every opening with
+  Reachout's own matching engine (LangChain pipeline; an optional local open-source model via Ollama adds a
+  short verdict) and, with the user's consent, auto-applies on public Greenhouse/Lever/Ashby forms with
+  Playwright. No logins, no made-up answers, stops at CAPTCHAs, at most 20 applications a day.
 - **Email finder**: give company websites (typed in or as a CSV/Excel list) and Reachout reads each site's
   pages for the HR and careers addresses it publishes (hr@, careers@, jobs@…), ready to save as contacts.
 - **Replies**: reads the user's mailbox read-only, matches replies to what they sent, works out what the person
@@ -127,6 +132,7 @@ Copy `.env.example` to `.env` for local use; on Render set these in the dashboar
 | `MONGODB_URI` / `MONGODB_DB` | local / `reachout` | Database connection and name |
 | `CLOUDINARY_URL` | empty | `cloudinary://<key>:<secret>@<cloud>` from Cloudinary → API Keys; file storage (empty = GridFS) |
 | `WA_SESSION_HOURS` | `2` | A saved WhatsApp login is deleted this many hours after linking; the user gets a notification |
+| `OLLAMA_URL` / `OLLAMA_MODEL` | local `http://127.0.0.1:11434` (empty in production) / `qwen3:4b` | Optional local open-source model that adds a verdict to the top AI job matches |
 | `SITE_URL` | request host | Public address of the **app** site (links, sitemap, share cards) |
 | `LANDING_URL` | — | Public address of the landing site (split hosting) |
 | `NETLIFY_PROXY_SECRET` | — | When set, only Netlify-signed requests are accepted (except `/healthz`) |
