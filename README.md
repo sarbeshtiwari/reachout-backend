@@ -9,6 +9,11 @@ Reachout helps people run their outreach and job search from one place:
   Reachout's own matching engine (LangChain pipeline; an optional local open-source model via Ollama adds a
   short verdict) and, with the user's consent, auto-applies on public Greenhouse/Lever/Ashby forms with
   Playwright. No logins, no made-up answers, stops at CAPTCHAs, at most 20 applications a day.
+- **Getting the web search keys (optional; career sites need none).** Each user adds their own in AI job match → Search keys:
+  - **Tavily** (free 1,000 searches/month, no card): sign up at https://app.tavily.com → the dashboard shows a key starting `tvly-` → copy it into Reachout.
+  - **Brave Search** ($5 free credit/month, about 1,000 searches; a credit card is required): sign up at
+    https://api-dashboard.search.brave.com → Subscriptions → choose the Search plan → API Keys → Add API key → copy it into Reachout.
+    Set a spending limit if offered; usage beyond the credit is billed.
 - **Email finder**: give company websites (typed in or as a CSV/Excel list) and Reachout reads each site's
   pages for the HR and careers addresses it publishes (hr@, careers@, jobs@…), ready to save as contacts.
 - **Replies**: reads the user's mailbox read-only, matches replies to what they sent, works out what the person
