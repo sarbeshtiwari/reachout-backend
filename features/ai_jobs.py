@@ -931,6 +931,29 @@ def can_hand_over():
     return not C().PRODUCTION and (platform.system() in ("Darwin", "Windows") or bool(os.environ.get("DISPLAY")))
 
 
+# The site decided the submission came from an automated browser. Reachout respects that: it stops, never retries or
+# hides itself, remembers the site, and hands the user a kit to apply from their own browser.
+BLOCKED = re.compile(r"flagged as (possible )?spam|couldn.t submit your application|unusual (activity|traffic)|"
+                     r"automated (requests|traffic|submission)|are you a (robot|human)|verify you are human|access denied", re.I)
+BLOCKED_RESULT = {"state": "blocked", "detail": "This site flagged the automated submission. Apply from your own browser; "
+                                                "Reachout has your answers ready to copy."}
+
+
+def board_key(job):
+    return f"{job.get('ats', '')}:{job.get('board', '')}"
+
+
+def mark_blocked(ws, job):
+    with ws.lock:
+        b = ws.load("ai_blocked_boards", {})
+        b[board_key(job)] = time.time()
+        ws.save("ai_blocked_boards", b)
+
+
+def is_blocked_board(ws, job):
+    return board_key(job) in ws.load("ai_blocked_boards", {})
+
+
 CONFIRMED = re.compile(r"thank you for applying|thanks for applying|application (has been )?(received|submitted)|"
                        r"we('ve| have) received your application|successfully submitted", re.I)
 
@@ -960,6 +983,8 @@ def apply_one(ws, job, submit=True, visible=False):
 
     visible=True (only when Reachout runs on the user's computer) does it in a browser window they can watch."""
     from playwright.sync_api import sync_playwright
+    if is_blocked_board(ws, job):
+        return {**BLOCKED_RESULT, "url": job["url"]}
     values = apply_values(ws)
     resume, data = resume_file(ws)
     if not data:
@@ -1003,9 +1028,14 @@ def apply_one(ws, job, submit=True, visible=False):
                 btn.click()
                 page.wait_for_timeout(6000)
                 live(page, "")
-                if CONFIRMED.search(page.locator("body").inner_text()):
+                body = page.locator("body").inner_text()
+                if CONFIRMED.search(body):
                     live(page, "Submitted ✓")
                     return {"state": "applied", "url": url, "detail": "Application submitted."}
+                if BLOCKED.search(body):
+                    live(page, "Stopped: the site flagged the automated submission")
+                    mark_blocked(ws, job)
+                    return {**BLOCKED_RESULT, "url": job["url"]}
                 if challenge_visible(page):
                     live(page, "Stopped: a CAPTCHA appeared on submit")
                     return {"state": "needs_you", "url": url, "detail": "A CAPTCHA appeared on submit, so finish it yourself."}
@@ -1119,6 +1149,8 @@ def login_wall(page):
 
 def watch_apply(w, ws, job, values, path):
     """Apply to one job in a new visible tab, pausing for the user where needed. Returns the result dict."""
+    if is_blocked_board(ws, job):
+        return {**BLOCKED_RESULT, "url": job["url"]}
     live = Live(ws.uid, job)
     url = apply_url(job)
     page = w.ctx.new_page()
@@ -1155,7 +1187,8 @@ def watch_apply(w, ws, job, values, path):
             snap = {"n": 0}
 
             def submitted(p, snap=snap):
-                if CONFIRMED.search(p.locator("body").inner_text(timeout=3000)):
+                body = p.locator("body").inner_text(timeout=3000)
+                if CONFIRMED.search(body) or BLOCKED.search(body):
                     return True
                 snap["n"] += 1
                 if snap["n"] % 5 == 0:  # keep a recent copy of what the user typed, in case they submit themselves
@@ -1167,6 +1200,10 @@ def watch_apply(w, ws, job, values, path):
                 if n:
                     live(page, f"Saved {n} of your answers for review")
             if a == "done":
+                if BLOCKED.search(page.locator("body").inner_text(timeout=3000)):
+                    mark_blocked(ws, job)
+                    live(page, "Stopped: the site flagged the automated submission")
+                    return {**BLOCKED_RESULT, "url": job["url"]}
                 live(page, "Submitted ✓")
                 return {"state": "applied", "url": url, "detail": "You submitted it in the Reachout window."}
             if a in ("skip", "closed", "timeout"):
@@ -1177,7 +1214,14 @@ def watch_apply(w, ws, job, values, path):
         live(page, "Submitting…")
         btn.click()
         page.wait_for_timeout(6000)
-        if CONFIRMED.search(page.locator("body").inner_text()):
+        body = page.locator("body").inner_text()
+        if BLOCKED.search(body):
+            mark_blocked(ws, job)
+            w.bar(page, "This site flagged the automated submission. Reachout stopped; apply from your own browser.")
+            live(page, "Stopped: the site flagged the automated submission")
+            page.wait_for_timeout(4000)
+            return {**BLOCKED_RESULT, "url": job["url"]}
+        if CONFIRMED.search(body):
             w.bar(page, "Submitted ✓ Moving on…")
             live(page, "Submitted ✓")
             page.wait_for_timeout(2000)
@@ -1387,3 +1431,38 @@ def delete_answer(ws, aid):
         bank.pop(aid, None)
         ws.save("ai_answers", bank)
     return jsonify(ok=True)
+
+
+@bp.get("/api/ai-jobs/kit/<jid>")
+@login_required
+def apply_kit(ws, jid):
+    """Everything needed to apply by hand: the link, contact details and the answers for this job's questions."""
+    core = C()
+    job = next((r for r in ws.load("ai_match", {}).get("results", []) if r["id"] == jid), None)
+    if not job:
+        raise core.Invalid("That job isn't in your matches any more.", status=404)
+    v = apply_values(ws)
+    labels = [("First name", "first"), ("Last name", "last"), ("Email", "email"), ("Phone", "phone"), ("Location", "location"),
+              ("LinkedIn", "linkedin"), ("GitHub", "github"), ("Portfolio", "portfolio"), ("Current company", "current_company"),
+              ("Notice period", "notice")]
+    fields = [{"label": l, "value": v[k]} for l, k in labels if v.get(k)]
+    bank = ws.load("ai_answers", {})
+    company = job.get("company", "")
+    questions = (ws.load("ai_applied", {}).get(jid) or {}).get("questions") or []
+    answers, seen = [], set()
+    for q in questions:
+        q = q.removesuffix(" (choose from the list)")
+        hit = answer_for(bank, q, company)
+        draft = None
+        if not hit:  # show a draft too, clearly marked, so the user can check it before using it
+            for a in bank.values():
+                if a.get("status") == "review" and (not a.get("company") or same_company(a["company"], company)) \
+                        and q_score(norm_q(q, company), a.get("norm") or "") >= 0.8:
+                    draft = a["answer"].replace("{company}", company)
+        answers.append({"question": q, "answer": hit or draft or "", "draft": bool(draft and not hit)})
+        seen.add(norm_q(q, company))
+    for a in bank.values():  # other answers written for this company
+        if a.get("company") and same_company(a["company"], company) and a.get("norm") not in seen:
+            answers.append({"question": a["question"], "answer": a["answer"].replace("{company}", company), "draft": a.get("status") != "approved"})
+    resume = resume_file(ws)[0]
+    return jsonify(url=job["url"], apply_url=apply_url(job), title=job["title"], company=company, resume=resume, fields=fields, answers=answers)

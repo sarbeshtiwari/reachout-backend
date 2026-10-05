@@ -190,3 +190,17 @@ def test_answer_bank_api(user):
     assert c.post("/api/ai-jobs/answers", json={"question": "", "answer": "x"}, headers=H).status_code == 400
     assert c.delete(f"/api/ai-jobs/answers/{r['id']}", headers=H).status_code == 200
     assert c.get("/api/ai-jobs/answers").get_json()["answers"] == []
+
+
+def test_a_flagged_site_is_never_automated_again_and_a_kit_is_offered(user, monkeypatch):
+    c, ws = user["client"], user["ws"]
+    job = {**JOBS[0], "id": "ab:notion:x", "ats": "ashby", "board": "notion", "company": "Notion", "can_apply": True, "score": 90}
+    ws.save("ai_match", {"results": [job]})
+    assert AI.BLOCKED.search("Your application submission was flagged as possible spam.")
+    AI.mark_blocked(ws, job)
+    r = AI.apply_one(ws, job, submit=True)
+    assert r["state"] == "blocked"  # no browser was opened for it
+    ws.save("ai_applied", {job["id"]: {"state": "blocked", "questions": ["Why do you want to work with Notion?"]}})
+    AI.save_answer(ws, "Why do you want to work with Notion?", "Because of the craft.", company="Notion", status="review", source="draft")
+    kit = c.get(f"/api/ai-jobs/kit/{job['id']}").get_json()
+    assert kit["url"] == job["url"] and kit["answers"][0]["answer"] == "Because of the craft." and kit["answers"][0]["draft"]
