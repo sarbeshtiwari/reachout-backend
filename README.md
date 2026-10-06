@@ -9,13 +9,18 @@ Reachout helps people run their outreach and job search from one place:
   Reachout's own matching engine (LangChain pipeline; an optional local open-source model via Ollama adds a
   short verdict) and, with the user's consent, auto-applies on public Greenhouse/Lever/Ashby forms with
   Playwright. No logins, no made-up answers, stops at CAPTCHAs, at most 20 applications a day.
+  Local model setup on a Mac: `brew install ollama && brew services start ollama && ollama pull qwen3:4b`.
+  - **Watch mode** (on your own computer): auto-apply opens a visible Chrome window, one tab per job, and pauses with a bar at the bottom of the page (Continue / Skip) whenever you're needed: signing in or creating an account, questions only you can answer (outlined in red), a CAPTCHA. **Fill & finish** does the same for one job. A live view on the page shows each step.
+  - **My answers** (supervised learning): answers to application questions, typed by you or learned from forms you filled in. Learned and drafted answers wait for your approval; only approved ones are ever filled. Company-specific answers (e.g. "Why Notion?") only go to that company; `{company}` is replaced in general ones. Rewordings of a question match, different questions don't.
+  - **Cover letter**: attached when a form has a cover letter upload, or pasted where it asks for the text; never sent otherwise. Choose it in the auto-apply settings (automatic = the file with "cover" in its name, a specific file, or none).
+  - **Sites that reject automated submissions** (e.g. Ashby's "flagged as possible spam"): Reachout stops, never retries or hides itself, stops automating that job board, and offers **Apply in my browser**: the form link plus your details and answers, ready to copy (or use the extension).
 - **Getting the web search keys (optional; career sites need none).** Each user adds their own in AI job match → Search keys:
   - **Tavily** (free 1,000 searches/month, no card): sign up at https://app.tavily.com → the dashboard shows a key starting `tvly-` → copy it into Reachout.
   - **Brave Search** ($5 free credit/month, about 1,000 searches; a credit card is required): sign up at
     https://api-dashboard.search.brave.com → Subscriptions → choose the Search plan → API Keys → Add API key → copy it into Reachout.
     Set a spending limit if offered; usage beyond the credit is billed.
 - **Reachout Autofill (Chrome extension).** Fills job applications in the user's own browser with their details, resume,
-  location and approved answers; the user checks the form and presses Submit (it never submits, and is not a bot).
+  location, cover letter and approved answers; the user checks the form and presses Submit (it never submits, and is not a bot).
   Source in `frontend/extension/`, downloadable from AI job match → Browser extension (`/downloads/reachout-autofill.zip`).
   It signs in with a personal extension key (create/revoke in the app), which only opens `/api/ext/*`: read application
   details, download the resume, match answers to a form's questions, and save typed answers for review.
@@ -72,6 +77,9 @@ features/
   notify.py         Notifications: live stream (SSE), browser push, Mac alerts
   portfolio.py      Projects for the website (from GitHub) + Git publishing
   site.py           Website builder: themes, sections, renderer, SEO, public pages, contact form
+  finder.py         Email finder: HR/careers addresses from company websites → contacts
+  ai_jobs.py        AI job match: resume → search → ranking (LangChain, optional Ollama), auto-apply, My answers
+  extension.py      API for the Reachout Autofill Chrome extension (personal extension key)
 tests/              pytest suite (security regressions + core flows)
 Dockerfile          The image Render runs
 render.yaml         Render blueprint
