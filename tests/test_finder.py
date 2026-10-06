@@ -4,7 +4,7 @@ import io
 import time
 
 import pytest
-from conftest import A, H
+from conftest import H
 
 from features import finder as F
 

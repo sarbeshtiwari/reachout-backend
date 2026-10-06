@@ -863,9 +863,6 @@ class Workspace:
         if row:
             drop_file(row["file_id"])
 
-    def files_size(self):
-        return sum(d["size"] for d in self.documents())
-
 
 def seed_workspace(ws, name, email):
     ws.save("recipients", [])
@@ -3006,16 +3003,6 @@ def is_admin(uid):
         return False
     first = M.users.find_one({}, {"_id": 1}, sort=[("created", ASCENDING)])
     return bool(first) and first["_id"] == uid
-
-
-def admin_required(fn):
-    @functools.wraps(fn)
-    @login_required
-    def wrapper(ws, *args, **kwargs):
-        if not is_admin(ws.uid):
-            return jsonify(error="Only the site owner can see this."), 403
-        return fn(ws, *args, **kwargs)
-    return wrapper
 
 
 def lead_out(row):

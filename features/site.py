@@ -364,9 +364,6 @@ def head(d, fallback=""):
     return f'<h2 class="sh rv">{escape(h)}</h2>' if h else ""
 
 
-NOIMG = ""  # broken cover images are handled by the page script (no inline handlers, so a strict CSP works)
-
-
 def render_section(s, cfg, projects):
     d, v, kind = s["data"], s["variant"], s["type"]
     socials = cfg["profile"]["socials"]

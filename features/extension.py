@@ -139,7 +139,6 @@ def company_for(ws, url, title=""):
 @bp.post("/api/ext/autofill")
 def autofill():
     """Your details plus the answers to this form's questions (approved ones; drafts are marked)."""
-    core = C()
     ws = ext_workspace()
     p = request.get_json(silent=True) or {}
     url, title = str(p.get("url") or "")[:500], str(p.get("title") or "")[:200]
@@ -192,7 +191,6 @@ def cover():
 @bp.post("/api/ext/learn")
 def learn():
     """Answers the user typed on this page, saved to My answers for their review (never used before approval)."""
-    core = C()
     ws = ext_workspace()
     p = request.get_json(silent=True) or {}
     ai = AI()
